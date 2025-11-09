@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Development containers (exclude all except entrypoint.sh and db-test.Dockerfile)
+.devcontainer/*
+!.devcontainer/entrypoint.sh
+!.devcontainer/db-test.Dockerfile
+
+# Documentation
+*.md
+docs/
+
+# Tests (not needed during build, except fixtures for test DB)
+spec/
+!spec/fixtures/
+test/
+
+# Temporary files
+tmp/
+*.tmp
+*.log
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Ruby/Bundler (keep only what's needed for bundle install)
+vendor/
+.bundle/
+
+# Database
+*.sqlite3
+*.db
+
+# Environment
+.env
+.env.*
+
+# Coverage
+coverage/

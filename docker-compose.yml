@@ -1,0 +1,100 @@
+services:
+  # Workspace контейнер для DevContainer
+  workspace:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - .:/workspace:cached
+      - /var/run/docker.sock:/var/run/docker.sock
+      - bundle_cache:/home/vscode/.bundle
+    working_dir: /workspace
+    depends_on:
+      db-dev:
+        condition: service_healthy
+      db-test:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db-dev:5432/gar_db_dev
+      - TEST_DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db-test:5432/gar_db_test
+      - RUBY_VERSION=3.4.5
+      - BUNDLE_GEMFILE=/workspace/Gemfile
+      - DISABLE_SPRING=true
+    networks:
+      - gar_network
+
+  # Development БД (порт 6432) - PostgreSQL 17
+  db-dev:
+    image: postgres:17
+    container_name: db_dev
+    environment:
+      POSTGRES_DB: gar_db_dev
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_DEV_PORT:-6432}:5432"
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c work_mem=64MB
+      -c maintenance_work_mem=256MB
+      -c temp_file_limit=1GB
+      -c max_wal_size=2GB
+      -c checkpoint_timeout=15min
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c effective_cache_size=2GB
+      -c synchronous_commit=off
+      -c fsync=off
+      -c max_connections=50
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gar_network
+
+  # Test БД (порт 6433) - PostgreSQL 13
+  db-test:
+    build:
+      context: .
+      dockerfile: .devcontainer/db-test.Dockerfile
+    container_name: db_test
+    environment:
+      POSTGRES_DB: gar_db_test
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_TEST_PORT:-6433}:5432"
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c work_mem=16MB
+      -c fsync=off
+      -c synchronous_commit=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gar_network
+
+volumes:
+  postgres_dev_data:
+    name: gar_postgres_dev_data
+  postgres_test_data:
+    name: gar_postgres_test_data
+  bundle_cache:
+    name: gar_bundle_cache
+
+networks:
+  gar_network:
+    name: gar_network

@@ -1,0 +1,28 @@
+/.bundle/
+/.yardoc
+/.claude
+/.ruby-lsp
+/.idea
+/.vscode
+/_yardoc/
+/coverage/
+/doc/
+/downloads/
+/pkg/
+/spec/reports/
+/vendor
+/node_modules
+/tmp/
+
+.rspec_status
+Gemfile.lock
+
+# macOS system files
+.DS_Store
+
+gar-*.gem
+
+# Environment
+.env
+.env.*
+!.env.example

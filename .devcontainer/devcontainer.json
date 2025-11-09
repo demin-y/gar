@@ -1,0 +1,92 @@
+{
+  "name": "GAR Ruby Development",
+  // Интеграция с docker-compose
+  "dockerComposeFile": "../docker-compose.yml",
+  "remoteUser": "vscode",
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  // Features для дополнительной функциональности
+  "features": {},
+  // Проброс портов для веб-сервера (БД доступны через docker-compose)
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Rails/Rack Server",
+      "onAutoForward": "notify",
+      "protocol": "http"
+    }
+  },
+  // Команды жизненного цикла
+  "postAttachCommand": "./.devcontainer/post-attach.sh",
+  "customizations": {
+    // VS Code настройки
+    "vscode": {
+      "extensions": [
+        "Shopify.ruby-lsp",
+        "ms-azuretools.vscode-docker",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-pg",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        // Ruby LSP настройки
+        "ruby.lsp.rubyVersionManager": "none",
+        "ruby.lsp.bundleGemfile": "/workspace/Gemfile",
+        "ruby.rubocop.onSave": true,
+        "ruby.rubocop.configFilePath": "/workspace/.rubocop.yml",
+        // Форматирование
+        "editor.formatOnSave": true,
+        "editor.formatOnSaveMode": "file",
+        "[ruby]": {
+          "editor.defaultFormatter": "Shopify.ruby-lsp",
+          "editor.formatOnSave": true,
+          "editor.tabSize": 2,
+          "editor.insertSpaces": true
+        },
+        // SQL Tools connections (пароль запрашивается при подключении)
+        "sqltools.connections": [
+          {
+            "name": "GAR Dev Database",
+            "driver": "PostgreSQL",
+            "server": "db-dev",
+            "port": 5432,
+            "database": "gar_db_dev",
+            "username": "postgres",
+            "askForPassword": true
+          },
+          {
+            "name": "GAR Test Database",
+            "driver": "PostgreSQL",
+            "server": "db-test",
+            "port": 5432,
+            "database": "gar_db_test",
+            "username": "postgres",
+            "askForPassword": true
+          }
+        ]
+      }
+    },
+    // JetBrains IDE настройки
+    "jetbrains": {
+      "backend": "RubyMine",
+      "plugins": [
+        "ruby",
+        "ruby-rspec",
+        "intelliruby",
+        "json",
+        "yaml",
+        "makefile-language",
+        "docker",
+        "database-tools",
+        "bash",
+        "psiviewer"
+      ]
+    }
+  },
+  // Переменные окружения (только уникальные для devcontainer,
+  // остальные наследуются из docker-compose.yml и Dockerfile)
+  "containerEnv": {
+    "RAILS_ENV": "development",
+    "RACK_ENV": "development"
+  }
+}

@@ -1,0 +1,85 @@
+require:
+   - rubocop-rspec
+   - rubocop-performance
+
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  Exclude:
+    - 'vendor/**/*'
+    - 'tmp/**/*'
+    - '.bundle/**/*'
+
+Layout/LineLength:
+  Max: 160
+
+Layout/MultilineAssignmentLayout:
+  Enabled: true
+  EnforcedStyle: new_line
+
+Layout/HashAlignment:
+  Enabled: true
+  EnforcedHashRocketStyle: table
+  EnforcedColonStyle: table
+
+Metrics/AbcSize:
+  Enabled: false
+
+Metrics/BlockLength:
+  Enabled: true
+  CountComments: false
+  Max: 75
+  Exclude:
+    - 'spec/**/*'
+
+Metrics/CyclomaticComplexity:
+  Enabled: true
+  Max: 25
+
+Metrics/ClassLength:
+  Enabled: false
+
+Metrics/MethodLength:
+  Enabled: false
+
+Metrics/ModuleLength:
+  Enabled: false
+
+Style/Documentation:
+  Enabled: false
+
+Style/FrozenStringLiteralComment:
+  Enabled: true
+  EnforcedStyle: always
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/SymbolArray:
+  EnforcedStyle: brackets
+
+Style/WordArray:
+  EnforcedStyle: brackets
+
+RSpec/ExampleLength:
+  Enabled: false
+
+RSpec/ContextWording:
+  Prefixes:
+    - когда
+    - с
+    - без
+    - если
+    - when
+    - with
+    - without
+    - if
+
+RSpec/MultipleExpectations:
+  Enabled: false
+
+RSpec/MultipleMemoizedHelpers:
+  Enabled: false
+
+Capybara/RSpec/PredicateMatcher:
+  Enabled: false
