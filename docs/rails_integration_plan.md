@@ -3,8 +3,10 @@
 > **Как продолжить.** Новая сессия начинается фразой «Продолжи работу по
 > docs/rails_integration_plan.md»: прочитать этот файл и `CLAUDE.md`, выполнить первый
 > незавершённый этап, в конце — rubocop, rspec, `/simplify` по диффу этапа, запись в журнал
-> (внизу), commit и push в `rails-integration`. Требования — `docs/rails_integration_requirements.md`,
-> структура архива — `docs/gar_archive_structure.md`.
+> (внизу), commit и push в `rails-integration`, PR `rails-integration` → `release-2`.
+> После слияния PR рабочая ветка пересоздаётся от `release-2` (не от `main`, см. `CLAUDE.md`).
+> Требования — `docs/rails_integration_requirements.md`, структура архива —
+> `docs/gar_archive_structure.md`.
 
 ## Статус этапов
 
@@ -423,7 +425,11 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
   2. `bundle exec rspec` зелёный;
   3. `/simplify` по диффу этапа;
   4. журнал обновлён;
-  5. commit и `git push -u origin rails-integration`.
+  5. commit и `git push -u origin rails-integration`;
+  6. PR `rails-integration` → `release-2` «Этап N: …»; сливает пользователь («Squash and merge»).
+- Ветки: `release-2` — интеграционная ветка 2.0 (только PR этапов); `rails-integration` —
+  рабочая, после слияния PR пересоздаётся от `origin/release-2`; `main` остаётся на 1.x до
+  финального PR `release-2` → `main` с версией 2.0.0 и тегом `v2.0.0`.
 - Новая сессия начинается фразой «Продолжи работу по docs/rails_integration_plan.md».
 
 ## Этапы
@@ -629,7 +635,9 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
 ### Этап 11. Итоговое код-ревью и simplify
 - [ ] `/code-review high` по всему диффу от `418b80e`, исправление находок.
 - [ ] `/simplify` по всему диффу.
-- [ ] Полный прогон; финальная запись в журнал. PR — только по просьбе.
+- [ ] Полный прогон; финальная запись в журнал.
+- [ ] По готовности 2.0 — PR `release-2` → `main`, версия 2.0.0, тег `v2.0.0`, публикация гема
+  (по решению пользователя).
 
 ### Этап 12 (необязательный). Функции для наборов extended/full
 - [ ] Участки и помещения (квартиры, офисы, комнаты) в путях, поиске и `Gar.address`.
@@ -705,3 +713,11 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
   - `search_spec` перевести на `GarSampleArchive`/`TestSupport` вместо `spec/fixtures/*.sql`
     (этап 5).
 - Дальше: этап 1.
+
+### 2026-10-02 — переход на ветку `release-2`
+- По решению пользователя этапы 2.0 собираются не в `main`, а в `release-2`: создана от `main`
+  (`75bac60`, релиз 1.0.0), каждый этап попадает туда через PR из `rails-integration`.
+- Правила веток записаны в `CLAUDE.md` (раздел «Ветки»): после слияния PR рабочая ветка
+  пересоздаётся от `origin/release-2`, в `main` не пушим до финала.
+- Открыт PR этапа 0 (требования + этап 0) в `release-2`.
+- Дальше: после слияния PR этапа 0 — этап 1.

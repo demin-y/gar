@@ -12,7 +12,24 @@ Ruby-гем `gar`: загрузка, импорт в PostgreSQL и поиск п
 2. `bundle exec rspec` — зелёный;
 3. `/simplify` по диффу этапа;
 4. отметить пункты в плане и дописать запись в «Журнал сессий»;
-5. commit и `git push -u origin rails-integration`.
+5. commit и `git push -u origin rails-integration`;
+6. открыть PR `rails-integration` → `release-2` «Этап N: …» с описанием из журнала
+   (PR на каждый этап — решение пользователя, разрешение постоянное). Сливает пользователь,
+   Claude — только по явной просьбе.
+
+## Ветки
+
+- `release-2` — интеграционная ветка 2.0: только слитые PR этапов, прямых коммитов нет.
+  Это **базовая ветка** работы вместо `main`.
+- `rails-integration` — рабочая ветка сессий. **После слияния PR этапа пересоздавай её от
+  `release-2`, а не от `main`** (в `main` нет работы 2.0):
+  ```bash
+  git fetch origin release-2
+  git checkout -B rails-integration origin/release-2
+  git push --force-with-lease -u origin rails-integration
+  ```
+- `main` — релиз 1.x. В неё не пушим и PR не открываем до готовности 2.0 (финал: PR
+  `release-2` → `main`, версия 2.0.0, тег `v2.0.0`). Исправления в `main` вливаются в `release-2`.
 
 Справка: требования портала — `docs/rails_integration_requirements.md` (Т1–Т19), структура
 реального архива и объёмы — `docs/gar_archive_structure.md`, форматы XML — `docs/xml_schema/*.xsd`,
