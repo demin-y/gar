@@ -1,6 +1,8 @@
 /.bundle/
 /.yardoc
-/.claude
+/.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
 /.ruby-lsp
 /.idea
 /.vscode

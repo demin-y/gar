@@ -103,7 +103,7 @@ module Gar
       zip_path
     end
 
-    # rubocop:disable Metrics/PerceivedComplexity
+    # rubocop:disable-next Metrics/PerceivedComplexity
     def download_file(url, destination_path, show_progress: false)
       max_attempts  = Gar.configuration.api_retry_attempts
       retry_timeout = Gar.configuration.api_retry_timeout
@@ -150,7 +150,6 @@ module Gar
 
       raise last_error if last_error
     end
-    # rubocop:enable Metrics/PerceivedComplexity
 
     def perform_download(url, destination_path, resume_download, existing_size, show_progress)
       uri  = URI.parse(url)

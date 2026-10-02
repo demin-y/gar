@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Поднимает тестовый PostgreSQL без Docker (облачные сессии, CI без services, локально).
+# Если на порту уже есть сервер (например, docker-compose db-test) — только создаёт базу.
+# Порт и база совпадают с TEST_DATABASE_URL по умолчанию (spec/support/test_database.rb).
+set -euo pipefail
+
+PORT=6433
+DB=gar_db_test
+DATA=/tmp/gar_pg_test
+IS_ROOT=$([ "$(id -u)" = "0" ] && echo 1 || echo 0)
+
+find_bindir() {
+  if command -v pg_config >/dev/null 2>&1 && [ -x "$(pg_config --bindir)/initdb" ]; then
+    pg_config --bindir
+  else
+    ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -n 1
+  fi
+}
+
+BIN="$(find_bindir)"
+[ -x "$BIN/initdb" ] || { echo "PostgreSQL не найден (нужны initdb и pg_ctl)" >&2; exit 1; }
+
+# initdb и postgres не запускаются от root — работаем от пользователя postgres
+as_pg() {
+  if [ "$IS_ROOT" = "1" ]; then
+    "$(PATH="$PATH:/usr/sbin:/sbin" command -v runuser)" -u postgres -- "$@"
+  else
+    "$@"
+  fi
+}
+
+if ! "$BIN/pg_isready" -q -h localhost -p "$PORT"; then
+  if [ ! -s "$DATA/PG_VERSION" ]; then
+    mkdir -p "$DATA"
+    [ "$IS_ROOT" = "1" ] && chown postgres:postgres "$DATA"
+    as_pg "$BIN/initdb" -D "$DATA" -U postgres --auth=trust --encoding=UTF8 --locale=C.UTF-8 >/dev/null
+  fi
+  as_pg "$BIN/pg_ctl" -D "$DATA" -l "$DATA/server.log" -w start \
+    -o "-p $PORT -k /tmp -c listen_addresses=localhost -c fsync=off -c synchronous_commit=off -c full_page_writes=off" >/dev/null
+fi
+
+if ! "$BIN/psql" -h localhost -p "$PORT" -U postgres -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DB'" | grep -q 1; then
+  "$BIN/createdb" -h localhost -p "$PORT" -U postgres "$DB"
+fi
+
+echo "Тестовая БД готова: postgresql://postgres:postgres@localhost:$PORT/$DB"

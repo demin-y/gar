@@ -2,86 +2,68 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
   pull_request:
-    branches: [ main ]
 
+# Push проверяет любую ветку; pull_request — только из форков, чтобы ветка этого репозитория
+# с открытым PR не гонялась дважды
 jobs:
   lint:
-    name: RuboCop (Ruby 3.4)
+    name: RuboCop
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
           bundler-cache: true
 
-      - name: Run RuboCop
-        run: bundle exec rubocop
+      - run: bundle exec rubocop
 
   test:
-    name: RSpec (Ruby ${{ matrix.ruby }})
+    name: RSpec (Ruby ${{ matrix.ruby }}, PostgreSQL ${{ matrix.postgres }})
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
 
+    # PostgreSQL 18 (как у портала) на всех Ruby, минимально поддерживаемый 16 — на одной
     strategy:
       fail-fast: false
       matrix:
-        ruby: ['3.1', '3.2', '3.3', '3.4']
+        ruby: ['3.3', '3.4', '4.0']
+        postgres: ['18']
+        include:
+          - ruby: '3.4'
+            postgres: '16'
 
     services:
       postgres:
-        image: postgres:13
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: gar_db_test
         ports:
           - 5432:5432
+        # Каталог данных в tmpfs: у образа 18+ он лежит внутри /var/lib/postgresql
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
-          --mount type=tmpfs,destination=/var/lib/postgresql/data
+          --health-retries 10
+          --mount type=tmpfs,destination=/var/lib/postgresql
           --shm-size=1g
 
     env:
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gar_db_test
-      PGHOST: localhost
-      PGUSER: postgres
-      PGPASSWORD: postgres
-      PGDATABASE: gar_db_test
+      GAR_SLOW_TESTS: '1'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Ruby ${{ matrix.ruby }}
-        uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client libpq-dev
-
-      - name: Wait for PostgreSQL
-        run: |
-          until pg_isready -h localhost -p 5432 -U postgres; do
-            echo "Waiting for PostgreSQL..."
-            sleep 1
-          done
-
-      - name: Load test fixtures
-        run: |
-          psql -h localhost -U postgres -d gar_db_test -f spec/fixtures/schema.sql
-          psql -h localhost -U postgres -d gar_db_test -f spec/fixtures/data.sql
-
-      - name: Run RSpec tests
-        run: bundle exec rspec
+      - run: bundle exec rspec

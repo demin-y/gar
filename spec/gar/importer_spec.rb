@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-# rubocop:disable RSpec/LeakyConstantDeclaration
 RSpec.describe Gar::Importer do
   let(:db_conn) { instance_double(PG::Connection) }
   let(:importer) { described_class.new(db_conn) }
@@ -275,7 +274,7 @@ RSpec.describe Gar::Importer do
     end
   end
 
-  # rubocop:disable RSpec/NestedGroups
+  # rubocop:disable-next RSpec/NestedGroups
   describe "#find_latest_full_base_zip" do
     let(:test_dir) { "/tmp/test_gar_full_base_#{rand(100_000)}" }
 
@@ -348,7 +347,6 @@ RSpec.describe Gar::Importer do
       end
     end
   end
-  # rubocop:enable RSpec/NestedGroups
 
   describe "#extract_version_from_archive" do
     it "извлекает версию из basename файла" do
@@ -1094,8 +1092,8 @@ RSpec.describe Gar::Importer do
   # ============================================================================
 
   # rubocop:disable RSpec/NestedGroups
-  describe "интеграционные тесты", :integration do
-    let(:real_db_conn) { IntegrationTestHelper.connection }
+  describe "интеграционные тесты", :db do
+    let(:real_db_conn) { TestDatabase.connection }
     let(:real_importer) { described_class.new(real_db_conn) }
     let(:test_schema) { "gar_test_#{Time.now.to_i}_#{rand(1000)}" }
 
@@ -1203,30 +1201,6 @@ RSpec.describe Gar::Importer do
         end
       end
     end
-
-    describe "#import_full_base", :slow do
-      let(:version_id) { 20_251_106 }
-      let(:zip_path) { GarArchiveHelper.create_test_archive(version_id: version_id) }
-      let(:expected_schema) { "gar_v#{version_id}" }
-
-      after do
-        GarArchiveHelper.cleanup(zip_path)
-        real_db_conn.exec("DROP SCHEMA IF EXISTS #{expected_schema} CASCADE")
-      rescue StandardError
-        nil
-      end
-
-      it "импортирует данные из тестового архива" do
-        result_schema = real_importer.import_full_base(zip_path)
-
-        expect(result_schema).to eq(expected_schema)
-        expect(real_importer.send(:schema_exists?, expected_schema)).to be true
-
-        result = real_db_conn.exec("SELECT COUNT(*) FROM #{expected_schema}.address_objects")
-        expect(result[0]["count"].to_i).to be >= 1
-      end
-    end
   end
   # rubocop:enable RSpec/MultipleMemoizedHelpers, RSpec/NestedGroups
 end
-# rubocop:enable RSpec/LeakyConstantDeclaration
