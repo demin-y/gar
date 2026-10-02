@@ -54,7 +54,7 @@ module Gar
         version = Meta.read(conn, current)&.version_id
         imports(conn, current).select do |name|
           meta = Meta.read(conn, name)
-          meta && (meta.status == "importing" || (version && meta.version_id < version))
+          meta && (meta.importing? || (version && meta.version_id < version))
         end
       end
 

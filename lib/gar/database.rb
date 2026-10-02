@@ -95,6 +95,14 @@ module Gar
       # Значение параметра-массива: $1::bigint[] и т. п.
       def array(values) = ARRAY.encode(values)
 
+      # Память сервера на операцию в текущей транзакции (setting — maintenance_work_mem или
+      # work_mem) — config.import_maintenance_work_mem на каждый воркер; без настройки
+      # действует значение сервера
+      def set_work_memory(conn, setting)
+        memory = Gar.configuration.import_maintenance_work_mem
+        conn.exec("SET LOCAL #{setting} TO #{conn.escape_literal(memory)}") if memory
+      end
+
       # Закрывает соединения пула; следующий with_connection создаст новый
       def disconnect!
         old = @mutex.synchronize { @pool.tap { @pool = nil } }

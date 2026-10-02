@@ -79,7 +79,7 @@ module Gar
     # (gar_meta.status = ready). Хватает права SELECT; ошибка соединения или прав и не заданный
     # адрес базы — false
     def available?
-      with_connection { |conn| Meta.read(conn, configuration.database_schema)&.status == "ready" }
+      with_connection { |conn| Meta.read(conn, configuration.database_schema)&.ready? || false }
     rescue UnavailableError, ConfigurationError, PG::Error => e
       logger.warn "База ГАР недоступна: #{e.message.strip}"
       false

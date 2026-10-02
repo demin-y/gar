@@ -43,7 +43,7 @@ module Gar
       end
     end
 
-    def self.updates_table(schema) = "#{Schema.quote(schema)}.#{Schema.quote(UPDATES)}"
+    def self.updates_table(schema) = Schema.qualify(schema, UPDATES)
 
     def initialize(db_conn = nil, schema: Gar.configuration.database_schema)
       @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
@@ -59,7 +59,7 @@ module Gar
       archive = Archive.open(source)
       Database.with_lock(db_conn, "Применение дельты #{archive.version_id} к схеме #{schema}") do
         meta = Meta.read(db_conn, schema) or raise ImportError, "В схеме #{schema} нет gar_meta: дельту не к чему применять"
-        raise ImportError, "Импорт в схему #{schema} не завершён: дельта применяется после него" if meta.status == "importing"
+        raise ImportError, "Импорт в схему #{schema} не завершён: дельта применяется после него" if meta.importing?
 
         if archive.version_id <= meta.version_id
           logger.info "Дельта #{archive.version_id} не новее схемы #{schema} (#{meta.version_id}): пропущена"
@@ -84,7 +84,7 @@ module Gar
       stage(archive, tables, jobs, on_progress)
 
       counts = nil
-      if meta.status == "ready"
+      if meta.ready?
         PathBuilder.new(db_conn, schema:).rebuild(path_object_ids(tables), param_object_ids: param_object_ids(tables)) do
           counts = merge_all(tables, meta, archive)
         end
@@ -103,10 +103,7 @@ module Gar
       done  = 0
       on_progress&.call(done, total, :delta)
       jobs.each do |job|
-        reader = XmlReader.new(job.table, region_code: job.region_code)
-        db_conn.copy_data(job.table.copy_sql("pg_temp")) do
-          archive.stream(job) { |io| reader.read(io) { db_conn.put_copy_data(_1) } }
-        end
+        archive.copy(db_conn, job, "pg_temp")
         on_progress&.call(done += job.size, total, :delta)
       rescue StandardError => e
         raise ImportError, "Ошибка в файле дельты #{job}: #{e.message}"

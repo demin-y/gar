@@ -25,8 +25,15 @@ module Gar
       param_types: "integer[]", keep_history: "text[] NOT NULL", prune_hierarchy: "boolean NOT NULL", status: "text NOT NULL",
       imported_at: "timestamptz", paths_built_at: "timestamptz", gem_version: "text NOT NULL"
     }.map { |name, type| Schema::Column.new(name:, type:) }.freeze
+    # Статусы: идёт импорт → данные загружены → пути построены, схему можно переключать
+    IMPORTING = "importing"
+    IMPORTED  = "imported"
+    READY     = "ready"
     # Время каждой стадии: статус → колонка
-    STAMPS = { "imported" => :imported_at, "ready" => :paths_built_at }.freeze
+    STAMPS = { IMPORTED => :imported_at, READY => :paths_built_at }.freeze
+
+    def importing? = status == IMPORTING
+    def ready? = status == READY
 
     # Схема загружена (или загружается) так же, как загрузит импорт версии version_id по
     # текущей конфигурации: её можно не загружать заново
@@ -54,7 +61,7 @@ module Gar
         values   = {
           version_id: archive.version_id, version_date: archive.version_date.iso8601,
           **settings.transform_values { _1.is_a?(Array) ? Database.array(_1) : _1 },
-          status: "importing", gem_version: VERSION
+          status: IMPORTING, gem_version: VERSION
         }
         conn.exec("CREATE TABLE #{qualified(schema)} (#{COLUMNS.map(&:definition).join(', ')})")
         conn.exec_params("INSERT INTO #{qualified(schema)} (#{values.keys.join(', ')}) VALUES (#{(1..values.size).map { "$#{_1}" }.join(', ')})",
@@ -93,7 +100,7 @@ module Gar
 
       def time(value) = value && Time.iso8601(value)
 
-      def qualified(schema) = "#{Schema.quote(schema)}.#{TABLE}"
+      def qualified(schema) = Schema.qualify(schema, TABLE)
     end
   end
 end

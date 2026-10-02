@@ -150,12 +150,20 @@ module Gar
     end
 
     # Поток данных файла (Entry или Job) прямо из zip
-    def stream(item)
-      entry = item.is_a?(Job) ? item.entry : item
-      File.open(path, "rb") { |file| yield Stream.new(file, entry) }
+    def stream(item, &) = open_entry(item.is_a?(Job) ? item.entry : item, &)
+
+    # Записи файла job — одной командой COPY в таблицу job.table схемы schema (pg_temp —
+    # временную); filters — XmlReader. Возвращает число записей
+    def copy(conn, job, schema, filters: {})
+      reader = XmlReader.new(job.table, filters:, region_code: job.region_code)
+      count  = 0
+      conn.copy_data(job.table.copy_sql(schema)) { count = stream(job) { |io| reader.read(io) { conn.put_copy_data(_1) } } }
+      count
     end
 
     private
+
+    def open_entry(entry) = File.open(path, "rb") { |file| yield Stream.new(file, entry) }
 
     # Работа для файла архива; nil — файл не нужен: чужая таблица, чужой субъект или файл
     # не на своём месте (справочник в папке субъекта и наоборот)

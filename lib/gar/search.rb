@@ -21,7 +21,6 @@ module Gar
   class Search
     UUID = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
     POSTAL_CODE = /\A\d{6}\z/
-    POSTAL_CODE_PARAM = 5
     # Порядок адресных объектов при равной текстовой близости: административные центры, затем
     # объекты с большим числом домов («Киров» — город раньше деревень «Кировский»), затем
     # регионы, районы, города, населённые пункты и улицы
@@ -224,12 +223,8 @@ module Gar
       raise ConfigurationError, "Иерархия #{hierarchy} не загружена: в схеме #{schema} нет таблицы #{name}"
     end
 
-    # Типы дома (h): основной (ht) и дополнительные (a1, a2) — краткие и полные имена
-    def house_type_joins
-      "LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type " \
-        "LEFT JOIN #{table(:add_house_types)} a1 ON a1.id = h.add_type1 " \
-        "LEFT JOIN #{table(:add_house_types)} a2 ON a2.id = h.add_type2"
-    end
+    # Типы дома h (Schema.house_type_joins)
+    def house_type_joins = Schema.house_type_joins(schema, "h")
 
     def hierarchy_table(hierarchy) = table(Configuration::HIERARCHY_TABLES.fetch(hierarchy))
 
@@ -298,11 +293,11 @@ module Gar
         params  = Database.existing_relations(conn, [table(:addr_obj_params), table(:house_params)])
         sources = []
         if params.include?(table(:addr_obj_params))
-          sources << "SELECT object_id FROM #{table(:addr_obj_params)} WHERE type_id = #{POSTAL_CODE_PARAM} AND value = #{value}"
+          sources << "SELECT object_id FROM #{table(:addr_obj_params)} WHERE type_id = #{Schema::POSTAL_CODE_PARAM} AND value = #{value}"
         end
         if params.include?(table(:house_params))
           sources << "SELECT hier.parent_obj_id FROM #{table(:house_params)} p JOIN #{sql.hierarchy_table} hier " \
-                     "ON hier.object_id = p.object_id AND hier.is_active WHERE p.type_id = #{POSTAL_CODE_PARAM} AND p.value = #{value}"
+                     "ON hier.object_id = p.object_id AND hier.is_active WHERE p.type_id = #{Schema::POSTAL_CODE_PARAM} AND p.value = #{value}"
         end
         next if sources.empty?
 

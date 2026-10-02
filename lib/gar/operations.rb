@@ -61,7 +61,7 @@ module Gar
           versions   = downloader.all_versions.sort_by { _1["VersionId"] }
           latest     = versions.last or raise DownloadError, "API ФНС не вернул ни одной выгрузки"
           from       = current&.version_id
-          next UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: []) if current&.status == "ready" && from >= latest["VersionId"]
+          next UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: []) if current&.ready? && from >= latest["VersionId"]
 
           if (chain = delta_chain(current, versions))
             chain.each { Delta.new(conn).apply(downloader.download_delta(_1, on_progress:), on_progress:) }
@@ -103,8 +103,8 @@ module Gar
 
     def switch_on(conn, schema, on_progress)
       on_progress&.call(0, 1, :switch)
-      status = Meta.read(conn, schema)&.status
-      raise ConfigurationError, "Схема #{schema} не готова (#{status || 'нет gar_meta'}): сначала Gar.build_paths" unless status == "ready"
+      meta = Meta.read(conn, schema)
+      raise ConfigurationError, "Схема #{schema} не готова (#{meta&.status || 'нет gar_meta'}): сначала Gar.build_paths" unless meta&.ready?
 
       Importer.new(conn).switch_to_imported_schema(schema)
       on_progress&.call(1, 1, :switch)
@@ -117,7 +117,7 @@ module Gar
 
     # Выгрузки после текущей версии, если их можно накатить дельтами; nil — нужен полный импорт
     def delta_chain(current, versions)
-      return no_chain("готовой текущей схемы нет") unless current&.status == "ready"
+      return no_chain("готовой текущей схемы нет") unless current&.ready?
 
       index = versions.index { _1["VersionId"] == current.version_id } or return no_chain("версии #{current.version_id} нет в списке выгрузок ФНС")
       chain = versions.drop(index + 1)

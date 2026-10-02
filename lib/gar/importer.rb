@@ -42,8 +42,8 @@ module Gar
       tables       = Gar.configuration.import_tables
 
       Database.with_lock(db_conn, "Импорт в схему #{schema}") do
-        next current if reuse_current && imported?(current, archive, region_codes, tables, statuses: ["ready"])
-        next schema if imported?(schema, archive, region_codes, tables, statuses: ["imported", "ready"])
+        next current if reuse_current && imported?(current, archive, region_codes, tables, statuses: [Meta::READY])
+        next schema if imported?(schema, archive, region_codes, tables, statuses: [Meta::IMPORTED, Meta::READY])
 
         import(archive, schema, region_codes, tables, on_progress)
       end
@@ -83,7 +83,7 @@ module Gar
       loaded = jobs.group_by(&:table).transform_values { |table_jobs| table_jobs.sum(&:size) }
       build_indexes(schema, tables.sort_by { -loaded.fetch(_1, 0) }, on_progress)
       # Статус пишется последним: схема в статусе importing — незавершённый импорт
-      Meta.update(db_conn, schema, "imported")
+      Meta.update(db_conn, schema, Meta::IMPORTED)
       logger.info "Импорт завершён: схема #{schema}"
       schema
     end
@@ -139,16 +139,10 @@ module Gar
     # Один файл — одна команда COPY в своей транзакции; возвращает число загруженных записей.
     # Ошибка — ImportError с именем файла: её можно передать из воркер-процесса в родителя
     def load_job(conn, archive, job, schema)
-      reader = XmlReader.new(job.table, filters: filters_for(job.table, archive.version_date), region_code: job.region_code)
-      count  = 0
-
       conn.transaction do
         conn.exec("SET LOCAL synchronous_commit TO off")
-        conn.copy_data(job.table.copy_sql(schema)) do
-          count = archive.stream(job) { |io| reader.read(io) { |chunk| conn.put_copy_data(chunk) } }
-        end
+        archive.copy(conn, job, schema, filters: filters_for(job.table, archive.version_date))
       end
-      count
     rescue StandardError => e
       raise ImportError, "Ошибка импорта файла #{job}: #{e.message}"
     end
@@ -176,7 +170,7 @@ module Gar
       each_on_server(tables, finish: ->(*) { on_progress&.call(done += 1, tables.size, :indexes) }) do |conn, table|
         logger.info "  Ключи, индексы и статистика: #{table.name}"
         conn.transaction do
-          set_work_memory(conn, "maintenance_work_mem")
+          Database.set_work_memory(conn, "maintenance_work_mem")
           table.index_sqls(schema).each { conn.exec(_1) }
           conn.exec("ANALYZE #{table.qualified_name(schema)}")
         end
@@ -198,9 +192,9 @@ module Gar
 
     def prune_hierarchy(conn, schema, table, loaded)
       name   = table.qualified_name(schema)
-      pruned = "#{quote(schema)}.#{quote("#{table.name}_pruned")}"
+      pruned = Schema.qualify(schema, "#{table.name}_pruned")
       conn.transaction do
-        set_work_memory(conn, "work_mem") # хеш OBJECTID загруженных объектов
+        Database.set_work_memory(conn, "work_mem") # хеш OBJECTID загруженных объектов
         kept = conn.exec("CREATE TABLE #{pruned} AS SELECT * FROM #{name} WHERE object_id IN (#{loaded})").cmd_tuples
         conn.exec("DROP TABLE #{name}")
         conn.exec("ALTER TABLE #{pruned} RENAME TO #{quote(table.name)}")
@@ -222,13 +216,6 @@ module Gar
           finish&.call
         end
       end
-    end
-
-    # Память сервера на операцию — import_maintenance_work_mem на каждый воркер; без настройки
-    # действует значение сервера
-    def set_work_memory(conn, setting)
-      memory = Gar.configuration.import_maintenance_work_mem
-      conn.exec("SET LOCAL #{setting} TO #{conn.escape_literal(memory)}") if memory
     end
 
     def parallel_options
