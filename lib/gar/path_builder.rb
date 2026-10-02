@@ -55,6 +55,7 @@ module Gar
         done    += pending[table]
         create_path_indexes(table, hierarchies)
       end
+      update_ranks if tables.include?(:houses)
       Meta.update(db_conn, schema, "ready")
       updated
     end
@@ -65,7 +66,7 @@ module Gar
     def invalidate(object_ids)
       return 0 if hierarchies.empty?
 
-      ids   = PG::TextEncoder::Array.new.encode(object_ids.map { Integer(_1) })
+      ids   = Database.array(object_ids.map { Integer(_1) })
       reset = hierarchies.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
       found = ["object_id = ANY($1::bigint[])", *hierarchies.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
 
@@ -161,6 +162,40 @@ module Gar
       ["full_#{hierarchy}_path = COALESCE(t.full_#{hierarchy}_path, p.#{hierarchy})",
        "full_#{hierarchy}_path_tsv = COALESCE(t.full_#{hierarchy}_path_tsv, to_tsvector('russian', p.#{hierarchy}))",
        "#{hierarchy}_path_ids = COALESCE(t.#{hierarchy}_path_ids, p.#{hierarchy}_ids)"].join(", ")
+    end
+
+    # Ранжирование адресных объектов: число действующих домов в поддереве (по обеим
+    # иерархиям, дом считается один раз) и признак административного центра (параметры 22, 23;
+    # не центр — NULL). Пересчитывается при каждом build, переписываются только изменившиеся
+    # строки; затем статистика для планировщика поиска
+    def update_ranks
+      logger.info "Ранжирование адресных объектов: число домов и административные центры"
+      objects = qualified(:address_objects)
+      db_conn.exec(<<~SQL)
+        WITH c AS (
+          SELECT u.object_id, count(*)::int AS count
+          FROM #{qualified(:houses)} h CROSS JOIN LATERAL (#{house_ancestors}) u(object_id)
+          WHERE h.is_active GROUP BY u.object_id
+        )
+        UPDATE #{objects} ao SET house_count = c.count
+        FROM #{objects} a LEFT JOIN c ON c.object_id = a.object_id
+        WHERE ao.id = a.id AND ao.house_count IS DISTINCT FROM c.count
+      SQL
+      if table_exists?(:addr_obj_params)
+        capital = "NULLIF(ao.object_id IN (SELECT object_id FROM #{qualified(:addr_obj_params)} " \
+                  "WHERE type_id IN (22, 23) AND lower(value) NOT IN ('0', 'false')), false)"
+        db_conn.exec("UPDATE #{objects} ao SET is_capital = #{capital} WHERE ao.is_capital IS DISTINCT FROM #{capital}")
+      end
+      db_conn.exec("VACUUM (ANALYZE) #{objects}")
+    end
+
+    # Предки дома (h) по загруженным иерархиям без повторов: путь без самого дома; объекты
+    # муниципального пути, которых нет в административном
+    def house_ancestors
+      paths = hierarchies.map { "h.#{_1}_path_ids[:cardinality(h.#{_1}_path_ids) - 1]" }
+      return "SELECT unnest(#{paths[0]})" if paths.size == 1
+
+      "SELECT unnest(#{paths[0]}) UNION ALL SELECT m FROM unnest(#{paths[1]}) m WHERE m <> ALL(COALESCE(#{paths[0]}, '{}'))"
     end
 
     def empty_condition(hierarchies) = hierarchies.map { "full_#{_1}_path IS NULL" }.join(" OR ")

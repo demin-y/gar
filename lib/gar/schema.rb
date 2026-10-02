@@ -118,9 +118,13 @@ module Gar
       # Полные пути, их tsvector и OBJECTID объектов пути от корня до самого объекта (для
       # поиска в границах и пересборки поддерева): заполняет построитель путей
       def paths
-        @derived.concat([:full_adm_path, :full_mun_path].map { Column.new(name: _1, type: :text) })
-        @derived.concat([:full_adm_path_tsv, :full_mun_path_tsv].map { Column.new(name: _1, type: :tsvector) })
-        @derived.concat([:adm_path_ids, :mun_path_ids].map { Column.new(name: _1, type: :"bigint[]") })
+        [:full_adm_path, :full_mun_path].each { derived_column(_1, :text) }
+        [:full_adm_path_tsv, :full_mun_path_tsv].each { derived_column(_1, :tsvector) }
+        [:adm_path_ids, :mun_path_ids].each { derived_column(_1, :"bigint[]") }
+      end
+
+      def derived_column(name, type)
+        @derived << Column.new(name:, type:)
       end
 
       # Вычисляемая колонка: PostgreSQL считает её сам при COPY и UPDATE
@@ -172,7 +176,13 @@ module Gar
         table(name, file, element, region_code: true, actual: ACTUAL_RECORD) { object_record(&columns) }
       end
 
-      def params_table(name, file) = table(name, file, "PARAM", actual: CURRENT_PARAM) { param }
+      # postal_code — индекс по почтовому индексу (тип 5) для поиска по нему
+      def params_table(name, file, postal_code: false)
+        table(name, file, "PARAM", actual: CURRENT_PARAM) do
+          param
+          index :postal_code, "(value) WHERE type_id = 5" if postal_code
+        end
+      end
     end
 
     # Справочники корня архива
@@ -215,15 +225,21 @@ module Gar
         text :name, :type_name
         integer :level, :oper_type_id
         paths
+        # Число действующих домов в поддереве и признак административного центра — для
+        # ранжирования поиска; заполняет построитель путей
+        derived_column :house_count, :integer
+        derived_column :is_capital, :boolean
+        # Название с типом для полнотекстового поиска (стеммер russian сам приводит ё к е)
+        generated :name_tsv, :tsvector, "to_tsvector('russian', name || ' ' || type_name)"
         index :level
-        index :fulltext, "USING gin (to_tsvector('russian', name || ' ' || type_name)) WHERE is_active = true"
+        index :name_tsv, "USING gin (name_tsv) WHERE is_active"
       end,
       table(:addr_obj_division, "ADDR_OBJ_DIVISION", "ITEM") do
         bigint :id, :parent_id, :child_id, :change_id
         index :parent_id
         index :child_id
       end,
-      params_table(:addr_obj_params, "ADDR_OBJ_PARAMS"),
+      params_table(:addr_obj_params, "ADDR_OBJ_PARAMS", postal_code: true),
       # Код субъекта берётся из имени папки (region_code), REGIONCODE из XML не храним
       table(:adm_hierarchy, "ADM_HIERARCHY", "ITEM", region_code: true, actual: ACTIVE_ITEM, ignored: ["REGIONCODE"]) do
         hierarchy_item { text :area_code, :city_code, :place_code, :plan_code, :street_code }
@@ -238,7 +254,7 @@ module Gar
         # Номер для сравнения: без пробелов, в нижнем регистре, ё → е («10 А» → «10а»)
         generated :house_num_norm, :text, "translate(lower(regexp_replace(house_num, '\\s+', '', 'g')), 'ё', 'е')"
       end,
-      params_table(:house_params, "HOUSES_PARAMS"),
+      params_table(:house_params, "HOUSES_PARAMS", postal_code: true),
       object_table(:steads, "STEADS", "STEAD") do
         text :number
         integer :oper_type_id

@@ -20,6 +20,7 @@ module Gar
     UNAVAILABLE_ERRORS = [PG::ConnectionBad, PG::UnableToSend, PG::QueryCanceled, ::ConnectionPool::TimeoutError].freeze
     # После них соединение не годится для следующих запросов
     BROKEN_ERRORS = [PG::ConnectionBad, PG::UnableToSend].freeze
+    ARRAY = PG::TextEncoder::Array.new
 
     @mutex       = Mutex.new
     @connections = ObjectSpace::WeakMap.new
@@ -54,6 +55,14 @@ module Gar
       def relation_exists?(conn, qualified_name)
         !conn.exec_params("SELECT to_regclass($1)", [qualified_name]).getvalue(0, 0).nil?
       end
+
+      # Какие из таблиц и индексов есть (имена — уже в кавычках), одним запросом
+      def existing_relations(conn, qualified_names)
+        conn.exec_params("SELECT n FROM unnest($1::text[]) n WHERE to_regclass(n) IS NOT NULL", [array(qualified_names)]).column_values(0)
+      end
+
+      # Значение параметра-массива: $1::bigint[] и т. п.
+      def array(values) = ARRAY.encode(values)
 
       # Закрывает соединения пула; следующий with_connection создаст новый
       def disconnect!

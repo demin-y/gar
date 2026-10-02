@@ -41,7 +41,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(tables_in(schema)).to match_array(Gar::Schema::TABLES.keys + [:gar_meta])
       expect(table_count(schema, "stead_params")).to eq(1)
-      expect(values("addr_obj_params")).to eq(["1", "2", "3", "31"])
+      expect(values("addr_obj_params")).to eq(["1", "2", "3", "4", "31"])
       expect(table_count(schema, "change_history")).to eq(1)
     end
 
@@ -66,8 +66,8 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "address_objects")).to eq(18)
-      expect(values("addr_obj_params")).to eq(["1", "2", "3", "31"])
+      expect(table_count(schema, "address_objects")).to eq(21)
+      expect(values("addr_obj_params")).to eq(["1", "2", "3", "4", "31"])
     end
 
     it "отбирает параметры по config.param_types" do
@@ -97,7 +97,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(values("houses", "region_code")).to eq(["11", "43"])
       expect(values("address_objects", "region_code")).to eq(["11", "43"])
-      expect(table_count(schema, "address_object_types")).to eq(7)
+      expect(table_count(schema, "address_object_types")).to eq(9)
       expected = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables, region_codes: ["43", "11"]).sum(&:size)
       expect(progress.last).to eq([expected, expected])
     end
@@ -121,7 +121,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
       expect(hierarchy_objects.call).to be_empty
-      expect(table_count(schema, "adm_hierarchy")).to eq(23)
+      expect(table_count(schema, "adm_hierarchy")).to eq(26)
 
       Gar.configuration.preset = :extended
       import
@@ -140,7 +140,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([15, 11, 23, 3])
+      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([18, 11, 26, 3])
     end
   end
 

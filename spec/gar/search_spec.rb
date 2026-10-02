@@ -26,6 +26,55 @@ RSpec.describe Gar::Search, :db do
     end
   end
 
+  describe "текстовый запрос" do
+    def names(query, **) = search.search_address_objects(query, **).map(&:name)
+
+    it "ищет слова вместе с синонимами: тип и частые слова в названиях" do
+      expect(names("просп. Октябрьский")).to eq(["Октябрьский"])
+      expect(names("Б. Садовая")).to eq(["Большая Садовая"])
+      expect(names("улица Воровского")).to eq(["Воровского"])
+    end
+
+    it "берёт синонимы приложения без перестроения индекса" do
+      expect(names("прспк Октябрьский")).to be_empty
+
+      Gar.configuration.synonyms = { "проспект" => ["прспк"] }
+      expect(names("прспк Октябрьский")).to eq(["Октябрьский"])
+    end
+
+    it "ставит точное совпадение и административный центр выше: «Кир» — сначала город Киров" do
+      expect(names("Кир", autocomplete: true).first).to eq("Киров")
+      expect(names("Кир", autocomplete: true)).to include("Кировский", "Кировская")
+    end
+
+    it "по шести цифрам ищет объекты с почтовым индексом и улицы его домов" do
+      expect(names("610000")).to eq(["Ленина"])
+      expect(names("610017")).to eq(["Ленина"])
+      expect(names("999999")).to be_empty
+    end
+  end
+
+  describe "границы поиска (Т6) и код субъекта (Т9)" do
+    let(:kirov) { Gar::TestSupport::Sample.guid(4_300_003) }
+
+    it "region_codes: оставляет объекты и дома только этих субъектов, код — в каждом результате" do
+      expect(search.search_houses("Ленина 10").map(&:region_code)).to contain_exactly("43", "11")
+      expect(search.search_houses("Ленина 10", region_codes: ["43"]).map(&:region_code)).to eq(["43"])
+      expect(search.search_address_objects("Ленина", region_codes: [11]).map { [_1.name, _1.region_code] }).to eq([["Ленина", "11"]])
+    end
+
+    it "within: оставляет поддерево объекта по иерархии запроса" do
+      expect(search.search_address_objects("Ленина", within: kirov).map(&:gar_object_id)).to eq([4_300_010])
+      expect(search.search_houses("10", within: Gar::TestSupport::Sample.guid(1_100_001)).map(&:gar_object_id)).to eq([1_100_101])
+      expect(search.find_address_objects(level: 8, within: kirov).map(&:name)).to include("Ленина", "Воровского")
+      expect(search.find_house_by_guid(house_guid, within: Gar::TestSupport::Sample.guid(1_100_001))).to be_nil
+    end
+
+    it "within: принимает только GUID" do
+      expect { search.search_houses("Ленина", within: "Киров") }.to raise_error(ArgumentError, /within/)
+    end
+  end
+
   describe "#search_houses" do
     it "находит дома по пути с корпусом и отдаёт House с типом" do
       expect(search.search_houses("Киров Ленина 12 к. 2").map(&:object_guid)).to eq([house_guid])
@@ -46,7 +95,7 @@ RSpec.describe Gar::Search, :db do
   end
 
   it "отвергает неизвестную иерархию" do
-    expect { search.search_houses("10", path_type: :geo) }.to raise_error(ArgumentError, /path_type/)
+    expect { search.search_houses("10", hierarchy: :geo) }.to raise_error(ArgumentError, /Иерархия — :adm или :mun/)
   end
 
   it "ищет в схеме, переданной явно" do
