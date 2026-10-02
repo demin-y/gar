@@ -21,7 +21,7 @@ puts ""
 puts "Тестирование подключения..."
 begin
   downloader = Gar::Downloader.new
-  versions = downloader.get_all_versions
+  versions = downloader.all_versions
   puts "✓ Подключение к FIAS API работает!"
   puts "  Доступно #{versions.length} версий данных"
 rescue StandardError => e
@@ -30,6 +30,6 @@ end
 
 puts ""
 puts "Теперь можно запускать:"
-puts "  ./examples/downloader/download_full_base.rb"
-puts "  ./examples/downloader/get_all_versions.rb"
+puts "  ./examples/1_download_full_database.rb"
+puts "  ./examples/downloader/list_all_versions.rb"
 puts "  и другие скрипты загрузки"

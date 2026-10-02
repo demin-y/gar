@@ -8,3 +8,6 @@ RSpec::Core::RakeTask.new(:spec) do |_task|
 end
 
 task default: :spec
+
+# Задачи gar:* на копии репозитория: bundle exec rake "gar:import[43,11]" (настройки — из ENV)
+load File.expand_path("lib/gar/tasks/gar.rake", __dir__)

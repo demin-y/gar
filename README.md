@@ -1,65 +1,126 @@
-# GAR - Ruby Gem для работы с Государственным адресным реестром
+# GAR — Ruby-гем для Государственного адресного реестра
 
 [![CI](https://github.com/demin-y/gar/actions/workflows/ci.yml/badge.svg)](https://github.com/demin-y/gar/actions/workflows/ci.yml)
-[![Ruby](https://img.shields.io/badge/ruby-3.1+-red.svg)](https://www.ruby-lang.org/)
+[![Ruby](https://img.shields.io/badge/ruby-3.3+-red.svg)](https://www.ruby-lang.org/)
 [![Gem Version](https://badge.fury.io/rb/gar.svg)](https://badge.fury.io/rb/gar)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-GAR (Государственный адресный реестр) - это Ruby gem, который предоставляет функциональность для работы с данными Государственного адресного реестра России. Позволяет скачивать, парсить и искать российские адреса вплоть до уровня дома.
+Гем скачивает выгрузки ГАР (ФИАС) с сайта ФНС, загружает нужные субъекты в PostgreSQL,
+обновляет базу дельтами и ищет по ней адреса вплоть до дома. Рассчитан на встраивание в
+Rails-приложение: поиск работает из потоков Puma, загрузка и обновление — из фоновых задач.
 
 ## Возможности
 
-- Скачивание полной базы ГАР с fias.nalog.ru
-- Обновление по расписанию: дельты ФНС к текущей схеме (`Gar.update!`)
-- Парсинг XML данных и импорт в PostgreSQL
-- Полнотекстовый поиск адресов с автодополнением и поддержкой естественного языка
-- Каскадный поиск по уровням ГАР (регионы → города → улицы → дома)
-- Поиск адресов по уникальному GUID
-- Построение полных строк адресов из ID объектов
-- Валидация компонентов адреса
-- Поддержка муниципальной и административной иерархий
+- Загрузка только нужных субъектов потоком из zip, без распаковки (`config.region_codes`)
+- Автодополнение одной строки ввода для формы адреса (`Gar.autocomplete`)
+- Адрес по GUID с разобранными полями и строкой по правилам ФНС (`Gar.address`)
+- Перенос старых адресов: дом по GUID улицы и номеру (`Gar.match_house`)
+- Полнотекстовый и каскадный поиск, поиск по GUID (`Gar::Search`)
+- Административная и муниципальная иерархии
+- Обновление по расписанию: дельты ФНС к текущей схеме или полный импорт (`Gar.update!`)
+- Rails: rake-задачи `gar:*`, генератор инициализатора, логгер приложения, события
+  `ActiveSupport::Notifications`
+- Тестовый набор данных для спек приложения (`Gar::TestSupport`)
 
 ## Установка
 
-Добавьте эту строку в Gemfile вашего приложения:
-
 ```ruby
-gem 'gar'
+# Gemfile
+gem "gar"
 ```
 
-Затем выполните:
-
-    $ bundle install
-
-Или установите самостоятельно:
-
-    $ gem install gar
+```bash
+bundle install
+bin/rails g gar:install   # config/initializers/gar.rb со всеми настройками
+```
 
 ## Требования
 
-- Ruby 3.1+
-- PostgreSQL 11+
-- Минимум 150GB свободного места для полной базы ГАР
+- Ruby 3.3+
+- PostgreSQL 16+ (CI проверяет 16 и 18)
+- Место на диске — см. «Объёмы»
 
-## Настройка
+## Объёмы
 
-1. Создайте базу данных PostgreSQL:
-```sql
-CREATE DATABASE gar_db;
-```
+Полная выгрузка ФНС одна на всю страну: даже для двух субъектов скачивается весь архив.
+Распаковывать его не нужно — XML читается потоком прямо из zip, файлы других субъектов не
+открываются. Цифры — по выгрузке 2026.01.16 (`docs/gar_archive_structure.md`), набор данных
+`:minimal` (по умолчанию).
 
-2. Укажите базу ГАР — переменной окружения или в настройке:
+| | Вся страна | Два субъекта (43, 11) |
+|---|---:|---:|
+| Архив (скачать) | 49,3 ГБ | 49,3 ГБ |
+| Распаковка на диск | не нужна | не нужна |
+| XML к разбору без параметров | ≈ 94 ГБ | ≈ 1,4 ГБ |
+| XML к разбору с параметрами | ≈ 188 ГБ | 2,95 ГБ |
+| Дельта (скачать) | 20–45 МБ | 20–45 МБ |
+| База (схема `gar`) | замер — `docs/real_data_checklist.md` | замер — там же |
+
+- **Диск под архив** нужен на время импорта; после него zip можно удалить
+  (`Gar::Downloader#cleanup_old_files`). Дельты весят десятки мегабайт.
+- **Диск под базу:** при полном импорте новая схема загружается рядом с текущей, а после
+  переключения прежняя остаётся резервной (`config.keep_backups = 1`) — на пике это три копии
+  схемы. Дельты меняют текущую схему на месте.
+- `rake gar:status` показывает место, которое занимает каждая схема.
+
+## Rails
+
+Генератор `bin/rails g gar:install` создаёт `config/initializers/gar.rb` со всеми настройками
+в комментариях. Минимум для двух субъектов — переменная `GAR_DATABASE_URL` и
+`config.region_codes = %w[43 11]`. Логгер гема по умолчанию — `Rails.logger` (берётся при
+каждом обращении, поэтому замена логгера приложения подхватывается).
+
+Rake-задачи (в zsh аргументы — в кавычках):
+
+| Задача | Что делает |
+|---|---|
+| `gar:download[version_id]` | скачивает полную выгрузку (по умолчанию последнюю) в `config.full_base_dir` |
+| `gar:import[43,11]` | загружает скачанный архив в новую схему `gar_v<версия>`; без аргументов — `config.region_codes` |
+| `gar:build_paths[схема]` | строит пути схемы (по умолчанию текущей) — нужны поиску |
+| `gar:switch[схема]` | делает готовую схему текущей |
+| `gar:update` | обновляет базу до последней выгрузки: дельты или полный импорт — для крона |
+| `gar:status` | версия, статус, субъекты и размер текущей, резервных и загружаемых схем, последние дельты |
+| `gar:cleanup` | удаляет лишние резервные схемы и схемы импорта, которые уже не станут текущими |
+
+Первая загрузка — `bin/rails gar:update` (базы нет — полный импорт) или по шагам:
+
 ```bash
-export GAR_DATABASE_URL="postgresql://user:password@localhost/gar_db"
+bin/rails gar:download
+bin/rails "gar:import[43,11]"          # => Загружена схема gar_v20260116
+bin/rails "gar:build_paths[gar_v20260116]"
+bin/rails "gar:switch[gar_v20260116]"
+bin/rails gar:status
 ```
 
-Гем **не читает `DATABASE_URL`**: в Rails-приложении это база самого приложения. Без
-настройки первое обращение к базе бросает `Gar::ConfigurationError`.
+Задачи печатают итог и прогресс долгих шагов, логи гема идут в лог приложения. Пока задача
+держит базу, вторая получает `Gar::LockedError`; `gar:update` в этом случае сообщает и
+выходит без ошибки — удобно для крона. Без Rails задачи подключаются строкой
+`load "gar/tasks/gar.rake"` в `Rakefile`.
+
+**Обновление по расписанию** — `gar:update` из крона или задача Solid Queue
+([examples/active_job_update.rb](examples/active_job_update.rb)):
+
+```yaml
+# config/recurring.yml
+production:
+  gar_update:
+    command: "Gar::Tasks.new.update"   # или class: GarUpdateJob
+    queue: gar
+    schedule: every tuesday and friday at 6am
+```
+
+ФНС публикует выгрузки по вторникам и пятницам.
+
+## Подключение к базе
+
+База ГАР — отдельная база или отдельный кластер, адрес — `GAR_DATABASE_URL`. Гем **не читает
+`DATABASE_URL`**: в Rails это база самого приложения. Без адреса первое обращение к базе
+бросает `Gar::ConfigurationError`.
 
 ```ruby
 Gar.configure do |config|
   config.database_url = ENV["GAR_DATABASE_URL"] # по умолчанию
-  config.pool_size    = 5   # пул соединений поиска (по соединению на поток Puma)
+  config.pool_size    = 5   # пул соединений поиска на процесс (по соединению на поток Puma)
   config.pool_timeout = 5   # ожидание свободного соединения, с
   config.connect_timeout          = 2 # с; у libpq не меньше 2
   config.search_statement_timeout = 1 # с, только для поиска; nil — без ограничения
@@ -68,17 +129,37 @@ end
 
 **Соединения.** Поиск берёт соединение из пула на время вызова, поэтому `Gar::Search`
 можно вызывать из нескольких потоков; свой запрос — `Gar.with_connection { |conn| … }`.
-Импорт и построение путей открывают свои соединения без `statement_timeout`. Если база
-недоступна, истёк таймаут запроса или пул занят дольше `pool_timeout`, поиск бросает
+Загрузка, пути, переключение и дельты открывают свои соединения без `statement_timeout`. Если
+база недоступна, истёк таймаут запроса или пул занят дольше `pool_timeout`, поиск бросает
 `Gar::UnavailableError`: приложение может переключить форму на ручной ввод.
 `Gar.available?` — быстрая проверка (база отвечает, в текущей схеме `gar_meta.status = ready`:
-импорт завершён, пути построены);
-подходит и для health-эндпоинта, нужен только `SELECT`.
+импорт завершён, пути построены); подходит и для health-эндпоинта, нужен только `SELECT`.
 
 **Fork.** После `fork` (Puma в кластерном режиме, Solid Queue) дочерний процесс не трогает
 соединения родителя: гем отбрасывает их без закрытия и открывает свои. На macOS `libpq`
 с Kerberos падает в форкнутом процессе — добавьте `gssencmode=disable` в строку
 подключения: `postgresql://…/gar_db?gssencmode=disable`.
+
+**Пользователи базы.** Поиску достаточно чтения, загрузке нужны права на схемы. Удобно
+завести двух пользователей: приложение (веб и поиск) работает под читателем, загрузка и
+обновление (`gar:*`, фоновые задачи) — под импортёром со своим `GAR_DATABASE_URL`.
+
+```sql
+CREATE ROLE gar_importer LOGIN PASSWORD '…';
+CREATE ROLE gar_reader   LOGIN PASSWORD '…';
+-- Импортёр создаёт, переименовывает и удаляет схемы gar, gar_v<версия>, gar_backup_v<версия>
+GRANT CONNECT, CREATE, TEMPORARY ON DATABASE gar_db TO gar_importer;
+-- Читатель получает доступ ко всем будущим схемам и таблицам импортёра: схемы создаются
+-- заново при каждом полном импорте, а переключение — переименование
+GRANT CONNECT ON DATABASE gar_db TO gar_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE gar_importer GRANT USAGE ON SCHEMAS TO gar_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE gar_importer GRANT SELECT ON TABLES TO gar_reader;
+```
+
+Схемы, созданные до `ALTER DEFAULT PRIVILEGES`, открываются вручную:
+`GRANT USAGE ON SCHEMA gar TO gar_reader; GRANT SELECT ON ALL TABLES IN SCHEMA gar TO gar_reader;`.
+Под читателем работают `Gar.autocomplete`, `Gar.address`, `Gar.match_house`, `Gar::Search`,
+`Gar.available?` и `Gar.current_version`; запись в базу ему не нужна.
 
 **Инструментирование.** Если загружен ActiveSupport, каждый вызов поиска публикует событие
 `search.gar` (`method`, `query`/`guid`, `schema`, `count`) — оно видно в логах и APM:
@@ -91,53 +172,24 @@ end
 
 ## Использование
 
-Gem предоставляет три основных компонента для работы с ГАР:
-
-1. **Downloader** — загрузка данных с fias.nalog.ru
-2. **Importer** — импорт данных в PostgreSQL
-3. **Search** — полнотекстовый поиск адресов
-
-### Быстрый старт
+### Быстрый старт без Rails
 
 ```ruby
 require "gar"
 
-# 1. Настройка подключения к БД
 Gar.configure do |config|
-  config.database_url = 'postgresql://localhost/gar_db'
-  config.database_schema = 'gar'
+  config.database_url = "postgresql://localhost/gar_db"
+  config.region_codes = %w[43 11]
   # config.logger = false  # без логов; по умолчанию — Rails.logger (если есть) или $stdout
 end
 
-# 2. Скачивание полной базы данных
-downloader = Gar::Downloader.new
-latest_version = downloader.latest_version
-zip_path = downloader.download_full_base(latest_version)
+Gar.update! # базы нет — скачивание, импорт, пути, переключение; дальше — дельты
 
-# 3. Импорт данных в PostgreSQL
-importer = Gar::Importer.new
-schema_name = importer.import_full_base(zip_path)
-
-# 4. Построение полных адресных путей (требуется для поиска!)
-Gar::PathBuilder.new(schema: schema_name).build
-
-# 5. Переключение на новую схему
-importer.switch_to_imported_schema(schema_name)
-
-# 6. Поиск адресов
-search = Gar::Search.new
-results = search.search_address_objects("Москва Ленина", limit: 10)
-results.each { |r| puts r.full_adm_path }
+Gar.autocomplete("Киров, Ленина 10б").each { puts _1.address }
+Gar.address(house_guid).full_address
 ```
 
-> 💡 **Полные рабочие примеры** доступны в папке [examples/](examples/):
-> - [1_download_full_database.rb](examples/1_download_full_database.rb) — загрузка полной базы
-> - [2_import_full_base.rb](examples/2_import_full_base.rb) — импорт с настройками
-> - [3_populate_full_paths.rb](examples/3_populate_full_paths.rb) — построение адресных путей
-> - [4_switch_to_imported_schema.rb](examples/4_switch_to_imported_schema.rb) — переключение схем
-> - [5_search.rb](examples/5_search.rb) — примеры поиска
-> - [active_job_import.rb](examples/active_job_import.rb) — загрузка фоновой задачей Rails
-> - [active_job_update.rb](examples/active_job_update.rb) — обновление дельтами по расписанию
+Примеры скриптов — в [examples/](examples/).
 
 ### Загрузка из приложения
 
@@ -209,8 +261,8 @@ result.to_version # версия базы после обновления
 - Дельту можно применить и вручную: `Gar::Delta.new.apply(zip)` (к текущей схеме, по порядку
   версий — пропуск промежуточной дельты этот метод не замечает).
 
-Пример задачи и расписания Solid Queue (`config/recurring.yml`) —
-[examples/active_job_update.rb](examples/active_job_update.rb).
+Из крона — `bin/rails gar:update`; пример задачи и расписания Solid Queue
+(`config/recurring.yml`) — [examples/active_job_update.rb](examples/active_job_update.rb).
 
 ### 1. Загрузка данных (Downloader)
 
@@ -538,7 +590,7 @@ Gar::TestSupport::Sample.guid(4_300_106) # дом «Ленина 14 к. 1 стр
 
 ## Схема базы данных
 
-Gem создает в схеме по таблице на каждый файл архива ГАР (описание — `Gar::Schema`).
+Гем создаёт в схеме по таблице на каждый файл архива ГАР (описание — `Gar::Schema`).
 Набор `:minimal` по умолчанию:
 
 - `address_objects` — адресные объекты (регионы, города, улицы)
@@ -551,162 +603,37 @@ Gem создает в схеме по таблице на каждый файл 
   `normative_docs_types`
 
 У объектов и иерархий есть колонка `region_code` — код субъекта из имени папки архива.
-Служебная таблица `gar_meta` описывает, с какими настройками загружена схема.
+Служебные таблицы: `gar_meta` — версия и настройки загрузки схемы, `gar_updates` — журнал
+применённых дельт (`Gar::Delta.history(conn, schema)`).
 
 ## Источники данных
 
-Данные скачиваются с официального сервиса ФИАС/ГАР:
-- Базовый URL: http://fias.nalog.ru/WebServices/Public
-- Полная база: GarXMLFullURL
-- Обновления: GarXMLDeltaURL
-
-## Замечания по производительности
-
-- Полный импорт базы занимает 4-8 часов в зависимости от оборудования
-- Размер базы: ~30-50GB
-- Поисковые запросы оптимизированы с индексами
-- Рекомендуется использовать SSD хранилище для лучшей производительности
+- Список выгрузок — API ФНС `https://fias.nalog.ru/WebServices/Public/GetAllDownloadFileInfo`
+  (`config.api_all_versions_url`): у каждой выгрузки ссылки `GarXMLFullURL` и `GarXMLDeltaURL`.
+- Архивы — файловый сервер `https://fias-file.nalog.ru/downloads/<ГГГГ.ММ.ДД>/`.
+- У ФНС сертификат российского УЦ: добавьте его в хранилище сертификатов ОС или (только для
+  проверки) `config.api_ssl_verify = false`.
+- Из некоторых сетей API отвечает с таймаутом, хотя файловый сервер доступен; адрес API
+  настраивается. Структура реальных архивов и дельт — `docs/gar_archive_structure.md`,
+  оглавление архива без скачивания — `examples/tools/gar_toc.py`, `gar_delta_probe.py`.
 
 ## Разработка
 
-Проект поддерживает два режима разработки:
-1. **DevContainer** (рекомендуется для VS Code / JetBrains)
-2. **Локальная разработка** (без контейнеров)
-
-### Вариант 1: DevContainer (рекомендуется)
-
-DevContainer автоматически настраивает полное окружение разработки с Ruby 3.4.5, PostgreSQL и всеми инструментами.
-
-**Требования:**
-- [VS Code](https://code.visualstudio.com/) с расширением [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop)
-
-**Быстрый старт:**
-1. Откройте проект в VS Code
-2. Нажмите `F1` → "Dev Containers: Reopen in Container"
-3. Подождите, пока контейнер соберется и зависимости установятся
-4. Готово! Обе БД запущены, gems установлены
-
-**Особенности DevContainer:**
-- Автоматический `bundle install` при создании
-- Обе БД (dev + test) запущены и доступны
-- SQL Tools подключения преднастроены (dev и test БД)
-- Ruby LSP и RuboCop настроены
-- Git интеграция
-
-**Подключение к БД из DevContainer:**
-- Dev БД: `db-dev:5432` (или `localhost:6432` с хоста)
-- Test БД: `db-test:5432` (или `localhost:6433` с хоста)
-
-### Вариант 2: Локальная разработка
-
-Если вы предпочитаете работать без DevContainer, используйте Makefile.
-
-**Требования:**
-- **mise** - менеджер версий
-- **Docker** - для PostgreSQL БД
-
-**Быстрый старт:**
 ```bash
-# Первоначальная настройка (установка Ruby и зависимостей)
-make setup
-
-# Запуск тестов
-make test
-
-# Интерактивная консоль
-make console
+bin/setup_test_db                 # тестовый PostgreSQL на :6433 (без Docker)
+bundle exec rspec                 # все тесты; :slow — с GAR_SLOW_TESTS=1
+bundle exec rubocop
 ```
 
-### Управление базами данных
-
-Проект использует ДВЕ раздельные БД:
-- **Dev БД** (порт 6432) - для разработки и экспериментов
-- **Test БД** (порт 6433) - для запуска тестов (данные загружают сами спеки через `Gar::TestSupport`)
-
-**Команды для dev БД:**
-```bash
-make dev-db-up          # Запустить dev БД
-make dev-db-down        # Остановить dev БД
-make dev-db-reset       # Сбросить dev БД (удалить volume)
-make dev-db-logs        # Показать логи
-make dev-db-psql        # Подключиться через psql
-make dev-db-shell       # Bash shell в контейнере
-```
-
-**Команды для test БД:**
-```bash
-make test-db-up         # Запустить test БД
-make test-db-down       # Остановить test БД
-make test-db-reset      # Сбросить test БД
-make test-db-logs       # Показать логи
-make test-db-psql       # Подключиться через psql
-```
-
-**Команды для обеих БД:**
-```bash
-make db-up              # Запустить обе БД
-make db-down            # Остановить обе БД
-make db-reset           # Сбросить обе БД (алиас для совместимости)
-make db-status          # Показать статус контейнеров
-make db-info            # Показать connection strings
-```
-
-### Запуск тестов
-
-```bash
-# Автоматический запуск (управляет test БД через spec_helper)
-make test
-
-# Или напрямую через RSpec
-bundle exec rspec
-
-# Запуск одного файла
-bundle exec rspec spec/gar/search_spec.rb
-
-# Запуск конкретного теста
-bundle exec rspec spec/gar/search_spec.rb:42
-```
-
-**Важно:** Test БД автоматически запускается перед тестами (через `spec_helper.rb`) и остается запущенной для удобства отладки. Для полного сброса используйте `make test-db-reset`.
-
-### Линтер и форматирование
-
-```bash
-make rubocop            # Проверка кода
-make rubocop-fix        # Автоматическое исправление
-```
-
-### Доступные команды
-
-Полный список команд с описанием:
-```bash
-make help
-```
-
-### Connection Strings
-
-```bash
-# Development
-postgresql://postgres:postgres@localhost:6432/gar_db_dev
-
-# Test
-postgresql://postgres:postgres@localhost:6433/gar_db_test
-```
-
-## Continuous Integration
-
-Проект использует GitHub Actions для автоматической проверки кода:
-- **RuboCop** проверяет стиль кода
-- **RSpec** запускает тесты на Ruby 3.1, 3.2, 3.3, 3.4
-- **PostgreSQL** используется для integration tests
-
-CI запускается автоматически при push в main и при создании PR.
+DevContainer, Docker Compose и команды `make` — в [DEVELOPMENT.md](DEVELOPMENT.md). CI
+(GitHub Actions) проверяет RuboCop и RSpec на Ruby 3.3, 3.4 и 4.0 с PostgreSQL 18 и на
+Ruby 3.4 с PostgreSQL 16. Изменения версий — [CHANGELOG.md](CHANGELOG.md).
 
 ## Лицензия
 
-Gem доступен как открытый исходный код на условиях [MIT License](https://opensource.org/licenses/MIT).
+Гем доступен как открытый исходный код на условиях [MIT License](https://opensource.org/licenses/MIT).
 
 ## Отказ от ответственности
 
-Этот gem не связан с Федеральной налоговой службой России или каким-либо государственным органом. Данные ГАР предоставляются публично и "как есть".
+Гем не связан с Федеральной налоговой службой России или каким-либо государственным органом.
+Данные ГАР предоставляются публично и «как есть».
