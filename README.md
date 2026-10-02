@@ -48,9 +48,44 @@ gem 'gar'
 CREATE DATABASE gar_db;
 ```
 
-2. Установите переменную окружения или передайте URL базы данных:
+2. Укажите базу ГАР — переменной окружения или в настройке:
 ```bash
-export DATABASE_URL="postgresql://user:password@localhost/gar_db"
+export GAR_DATABASE_URL="postgresql://user:password@localhost/gar_db"
+```
+
+Гем **не читает `DATABASE_URL`**: в Rails-приложении это база самого приложения. Без
+настройки первое обращение к базе бросает `Gar::ConfigurationError`.
+
+```ruby
+Gar.configure do |config|
+  config.database_url = ENV["GAR_DATABASE_URL"] # по умолчанию
+  config.pool_size    = 5   # пул соединений поиска (по соединению на поток Puma)
+  config.pool_timeout = 5   # ожидание свободного соединения, с
+  config.connect_timeout          = 2 # с; у libpq не меньше 2
+  config.search_statement_timeout = 1 # с, только для поиска; nil — без ограничения
+end
+```
+
+**Соединения.** Поиск берёт соединение из пула на время вызова, поэтому `Gar::Search`
+можно вызывать из нескольких потоков; свой запрос — `Gar.with_connection { |conn| … }`.
+Импорт и построение путей открывают свои соединения без `statement_timeout`. Если база
+недоступна, истёк таймаут запроса или пул занят дольше `pool_timeout`, поиск бросает
+`Gar::UnavailableError`: приложение может переключить форму на ручной ввод.
+`Gar.available?` — быстрая проверка (база отвечает, текущая схема есть, пути построены);
+подходит и для health-эндпоинта, нужен только `SELECT`.
+
+**Fork.** После `fork` (Puma в кластерном режиме, Solid Queue) дочерний процесс не трогает
+соединения родителя: гем отбрасывает их без закрытия и открывает свои. На macOS `libpq`
+с Kerberos падает в форкнутом процессе — добавьте `gssencmode=disable` в строку
+подключения: `postgresql://…/gar_db?gssencmode=disable`.
+
+**Инструментирование.** Если загружен ActiveSupport, каждый вызов поиска публикует событие
+`search.gar` (`method`, `query`/`guid`, `schema`, `count`) — оно видно в логах и APM:
+
+```ruby
+ActiveSupport::Notifications.subscribe("search.gar") do |event|
+  Rails.logger.info "ГАР #{event.payload[:method]}: #{event.duration.round(1)} мс, #{event.payload[:count]}"
+end
 ```
 
 ## Использование
@@ -243,7 +278,7 @@ results = search.search_address_objects("Моск", autocomplete: true, limit: 5
 
 # Каскадный поиск по уровням
 regions = search.find_address_objects(level: 1, limit: 10)
-cities = search.find_address_objects(parent_guid: region_guid, level: 5)
+cities = search.find_address_objects(parent_guid: region_guid, level: [5, 6])
 streets = search.find_address_objects(parent_guid: city_guid, level: 8)
 
 # Поиск домов
@@ -256,6 +291,10 @@ house_results = search.search_houses("д. 10", limit: 10)
 address = search.find_address_object_by_guid("550e8400-e29b-41d4-a716-446655440000")
 house = search.find_house_by_guid("650e8400-e29b-41d4-a716-446655440000")
 ```
+
+Результаты — `Gar::AddressObject` и `Gar::House` (`Data`): `id`, `gar_id` (OBJECTID ГАР),
+`object_guid`, название или номер и тип, `full_adm_path`, `full_mun_path`; у адресного
+объекта ещё `level`. Схема — `config.database_schema` или `Gar::Search.new(schema: …)`.
 
 ## Схема базы данных
 

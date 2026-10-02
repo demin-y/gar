@@ -1,117 +1,114 @@
 # frozen_string_literal: true
 
+require "connection_pool"
+
 module Gar
-  class Database
-    include Loggable
+  # Соединения с базой ГАР.
+  #
+  # Поиск берёт соединения из пула (Gar.with_connection): размер — pool_size, ожидание
+  # свободного — pool_timeout, на каждом соединении statement_timeout = search_statement_timeout.
+  # Импорт и построение путей открывают свои соединения без statement_timeout
+  # (create_connection): их запросы идут часами.
+  #
+  # Fork: дочерний процесс наследует соединения родителя и не должен ни пользоваться ими, ни
+  # закрывать их — PQfinish (в том числе из финализатора при выходе) пошлёт серверу Terminate
+  # по общему сокету и оборвёт соединение родителя. Поэтому сразу после fork (хук
+  # Process._fork) все соединения, открытые гемом, отбрасываются без PQfinish — сокет
+  # перенаправляется в /dev/null, как discard! в Active Record, — а пул создаётся заново
+  # при первом обращении.
+  module Database
+    # Ошибки, при которых база считается недоступной: приложение переключается на ручной ввод
+    UNAVAILABLE_ERRORS = [PG::ConnectionBad, PG::UnableToSend, PG::QueryCanceled, ::ConnectionPool::TimeoutError].freeze
+    # После них соединение не годится для следующих запросов
+    BROKEN_ERRORS = [PG::ConnectionBad, PG::UnableToSend].freeze
 
-    CONNECTION_OK         = PG::CONNECTION_OK
-    RETRYABLE_ERRORS      = [PG::UnableToSend, PG::ConnectionBad].freeze
-    BASE_DELAY_MULTIPLIER = 2
-
-    attr_reader :conn
-
-    def initialize(conn = nil)
-      @conn = conn || self.class.create_connection
-    end
-
-    def with_retry(max_attempts: Gar.configuration.db_retry_max_attempts)
-      attempts = 0
-
-      begin
-        yield @conn
-      rescue *RETRYABLE_ERRORS => e
-        attempts += 1
-
-        if attempts > max_attempts
-          logger.error "Превышено количество попыток переподключения (#{max_attempts}): #{e.message}"
-          raise
-        end
-
-        delay = Gar.configuration.db_retry_base_delay * (BASE_DELAY_MULTIPLIER**(attempts - 1))
-        logger.warn "Ошибка соединения (попытка #{attempts}/#{max_attempts}): #{e.message}. Повтор через #{delay}с"
-        sleep(delay)
-
-        reconnect!
-        retry
-      end
-    end
-
-    def ensure_alive!
-      @conn.exec("SELECT 1")
-    rescue *RETRYABLE_ERRORS
-      logger.info("Переподключение к базе данных...")
-      reconnect!
-    end
-
-    def reconnect!
-      @conn.reset
-      logger.debug("Соединение сброшено")
-    rescue PG::Error => e
-      logger.warn("Не удалось сбросить соединение: #{e.message}")
-      safe_close
-      @conn = self.class.create_connection
-    end
-
-    def close
-      safe_close
-    end
-
-    @mutex = Mutex.new
+    @mutex       = Mutex.new
+    @connections = ObjectSpace::WeakMap.new
 
     class << self
-      def connection
-        @mutex.synchronize do
-          @connection = nil unless connection_valid?(@connection)
-          @connection ||= create_connection
+      # Соединение для импорта и построения путей: без statement_timeout, закрывает вызывающий
+      def create_connection(statement_timeout: nil)
+        config = Gar.configuration
+        url    = config.database_url
+        raise ConfigurationError, "Не задана база ГАР: укажите config.database_url или переменную GAR_DATABASE_URL" if url.to_s.empty?
+
+        conn = PG.connect(url, connect_timeout: config.connect_timeout, application_name: "gar")
+        conn.exec("SET statement_timeout TO #{(statement_timeout * 1000).round}") if statement_timeout
+        @connections[conn] = Process.pid
+        conn
+      end
+
+      # Соединение из пула на время блока. Недоступная база, таймаут запроса или ожидания
+      # пула — UnavailableError; сломанное соединение в пул не возвращается
+      def with_connection
+        pool.with do |conn|
+          yield conn
+        rescue *BROKEN_ERRORS
+          pool.discard_current_connection { close(_1) }
+          raise
         end
+      rescue *UNAVAILABLE_ERRORS => e
+        raise UnavailableError, "База ГАР недоступна: #{e.message.strip}"
       end
 
-      def create_connection(url = nil)
-        PG.connect(url || Gar.configuration.database_url)
+      # Закрывает соединения пула; следующий with_connection создаст пул по текущим настройкам
+      def disconnect!
+        old = @mutex.synchronize { @pool.tap { @pool = nil } }
+        old&.shutdown { close(_1) }
       end
 
-      def connection_valid?(conn)
-        return false unless conn
-        return false if conn.finished?
-
-        conn.status == CONNECTION_OK
-      rescue PG::Error
-        false
+      # Вызывается в дочернем процессе сразу после fork: соединения гема отбрасываются,
+      # пул будет создан заново
+      def after_fork
+        @mutex = Mutex.new
+        @pool  = nil
+        @connections.each_key { discard(_1) }
+        @connections = ObjectSpace::WeakMap.new
       end
 
-      # Дочерний процесс наследует соединения родителя. Их нельзя ни использовать, ни закрывать:
-      # PQfinish (в том числе из финализатора при выходе процесса) пошлёт серверу Terminate по
-      # общему сокету и оборвёт соединение родителя. Поэтому в дочернем процессе сокеты всех
-      # унаследованных соединений перенаправляются в /dev/null (как discard! в Active Record) —
-      # один раз на процесс. В процессе parent_pid ничего не делает.
-      # TODO(этап 3): хук Process._fork в пуле соединений вместо явного вызова
+      # Воркеры параллельного импорта отбрасывают все унаследованные соединения, в том числе
+      # переданные приложением в Importer.new: их гем не открывал, но воркер — его процесс.
+      # Один раз на процесс; в процессе parent_pid ничего не делает
       def discard_inherited_connections(parent_pid)
         return if [parent_pid, @discarded_in].include?(Process.pid)
 
         @discarded_in = Process.pid
-        ObjectSpace.each_object(PG::Connection) do |conn|
-          conn.socket_io.reopen(IO::NULL) unless conn.finished?
-        rescue PG::Error, IOError, SystemCallError
-          nil
-        end
+        ObjectSpace.each_object(PG::Connection) { discard(_1) }
       end
 
-      def disconnect!
+      private
+
+      def pool
         @mutex.synchronize do
-          @connection&.close unless @connection&.finished?
-          @connection = nil
+          @pool ||=
+            ::ConnectionPool.new(size: Gar.configuration.pool_size, timeout: Gar.configuration.pool_timeout,
+                                 auto_reload_after_fork: false) do
+              create_connection(statement_timeout: Gar.configuration.search_statement_timeout)
+            end
         end
+      end
+
+      def close(conn)
+        conn.close unless conn.finished?
       rescue PG::Error
-        @connection = nil
+        nil
+      end
+
+      def discard(conn)
+        conn.socket_io.reopen(IO::NULL) unless conn.finished?
+      rescue PG::Error, IOError, SystemCallError
+        nil
       end
     end
 
-    private
-
-    def safe_close
-      @conn&.close unless @conn&.finished?
-    rescue PG::Error
-      # Соединение уже закрыто
+    # Хук fork (Ruby ≥ 3.1): срабатывает для fork, Process.fork, Kernel#fork и Process.daemon
+    module ForkTracker
+      def _fork
+        pid = super
+        Database.after_fork if pid.zero?
+        pid
+      end
     end
+    Process.singleton_class.prepend(ForkTracker) if Process.respond_to?(:_fork)
   end
 end

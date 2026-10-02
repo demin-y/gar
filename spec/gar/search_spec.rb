@@ -1,139 +1,68 @@
 # frozen_string_literal: true
 
-require "mini_sql"
-
+# Поиск на фикстурах (схема gar, spec/fixtures): точечные проверки результатов и контракта.
+# Каскад по иерархии и автодополнение на связном наборе — в spec/integration/pipeline_spec.rb
 RSpec.describe Gar::Search, :db do
-  let(:schema_name) { "gar" }
-  let(:db_conn)     { TestDatabase.connection }
-  let(:search)      { described_class.new(db_conn) }
-
-  before do
-    allow(Gar.configuration).to receive(:database_schema).and_return(schema_name)
-  end
+  let(:search)      { described_class.new }
+  let(:street_guid) { "ade36438-cc47-4b4f-92a4-c7cb5ed42b92" }
+  let(:house_guid)  { "923290c1-5aa0-43ec-8bf2-3ba3b06f8b66" }
 
   describe "#search_address_objects" do
-    it "returns search results for address objects" do
-      results = search.search_address_objects("Зимняя")
-      expect(results).to be_an(Array)
-      expect(results.first).to have_attributes(name: "Зимняя", type_name: "ул.")
+    it "находит объект по названию и отдаёт AddressObject с обоими путями" do
+      expect(search.search_address_objects("Зимняя").first).to have_attributes(
+        class: Gar::AddressObject, object_guid: street_guid, name: "Зимняя", type_name: "ул.", level: 8,
+        full_adm_path: "Вологодская обл., Великоустюгский р-н, Куликово д., Зимняя ул.",
+        full_mun_path: "Вологодская обл., Великоустюгский м.о., Куликово д., Зимняя ул."
+      )
     end
 
-    it "returns empty array for empty query" do
-      results = search.search_address_objects("")
-      expect(results).to eq([])
+    it "в режиме автодополнения ищет последнее слово как префикс" do
+      expect(search.search_address_objects("Зи", autocomplete: true).map(&:name)).to include("Зимняя")
+      expect(search.search_address_objects("Зи").map(&:name)).not_to include("Зимняя")
     end
 
-    it "supports mun path type" do
-      results = search.search_address_objects("Зимняя", path_type: :mun)
-      expect(results).to be_an(Array)
-    end
-
-    it "supports autocomplete mode" do
-      results = search.search_address_objects("Зим", autocomplete: true)
-      expect(results).to be_an(Array)
-    end
-
-    it "supports pagination" do
-      results = search.search_address_objects("Зимняя", limit: 5, offset: 0)
-      expect(results.size).to be <= 5
+    it "на пустой запрос отвечает пустым списком без обращения к базе" do
+      expect(described_class.new(instance_double(PG::Connection)).search_address_objects("  ", autocomplete: true)).to eq([])
     end
   end
 
   describe "#search_houses" do
-    it "returns search results for houses" do
-      results = search.search_houses("10")
-      expect(results).to be_an(Array)
-      # NOTE: Test data may not have houses, so results might be empty
-    end
-
-    it "returns empty array for empty query" do
-      results = search.search_houses("")
-      expect(results).to eq([])
-    end
-
-    it "supports mun path type" do
-      results = search.search_houses("10", path_type: :mun)
-      expect(results).to be_an(Array)
-    end
-
-    it "supports autocomplete mode" do
-      results = search.search_houses("1", autocomplete: true)
-      expect(results).to be_an(Array)
+    it "находит дома по пути и отдаёт House с типом" do
+      expect(search.search_houses("Канаш Лермонтова 2").map(&:object_guid)).to include(house_guid)
+      expect(search.find_house_by_guid(house_guid)).to have_attributes(class: Gar::House, house_num: "2", house_type: "д.")
     end
   end
 
-  describe "#find_address_objects" do
-    context "when parent_guid is nil" do
-      it "finds regions (level 1)" do
-        results = search.find_address_objects
-        expect(results).to be_an(Array)
-        # Test data may not have level 1 objects, so check if array is returned
-      end
-    end
-
-    context "when parent_guid is provided" do
-      let(:parent_guid) { "ade36438-cc47-4b4f-92a4-c7cb5ed42b92" }
-
-      it "finds child objects" do
-        results = search.find_address_objects(parent_guid: parent_guid)
-        expect(results).to be_an(Array)
-      end
-
-      it "supports level filtering" do
-        results = search.find_address_objects(parent_guid: parent_guid, level: 8)
-        expect(results).to be_an(Array)
-      end
-
-      it "supports mun hierarchy" do
-        results = search.find_address_objects(parent_guid: parent_guid, path_type: :mun)
-        expect(results).to be_an(Array)
-      end
+  describe "поиск по GUID" do
+    it "находит объект и возвращает nil для неизвестного или некорректного GUID" do
+      expect(search.find_address_object_by_guid(street_guid).name).to eq("Зимняя")
+      expect(search.find_address_object_by_guid("00000000-0000-4000-8000-000000000000")).to be_nil
+      expect(search.find_address_object_by_guid("не guid")).to be_nil
+      expect(search.find_houses("не guid")).to eq([])
     end
   end
 
-  describe "#find_houses" do
-    let(:street_guid) { "ade36438-cc47-4b4f-92a4-c7cb5ed42b92" }
-
-    it "finds houses on the street" do
-      results = search.find_houses(street_guid)
-      expect(results).to be_an(Array)
-    end
-
-    it "supports mun hierarchy" do
-      results = search.find_houses(street_guid, path_type: :mun)
-      expect(results).to be_an(Array)
-    end
-
-    it "supports custom limit" do
-      results = search.find_houses(street_guid, limit: 50)
-      expect(results.size).to be <= 50
-    end
+  it "отвергает неизвестную иерархию" do
+    expect { search.search_houses("10", path_type: :geo) }.to raise_error(ArgumentError, /path_type/)
   end
 
-  describe "#find_address_object_by_guid" do
-    let(:guid) { "ade36438-cc47-4b4f-92a4-c7cb5ed42b92" }
-
-    it "finds address object by GUID" do
-      result = search.find_address_object_by_guid(guid)
-      expect(result).to have_attributes(object_guid: guid, name: "Зимняя")
-    end
-
-    it "supports mun path type" do
-      result = search.find_address_object_by_guid(guid, path_type: :mun)
-      expect(result).to have_attributes(object_guid: guid)
-    end
-
-    it "returns nil when not found" do
-      result = search.find_address_object_by_guid("non-existent-guid")
-      expect(result).to be_nil
-    end
+  it "ищет в схеме, переданной явно" do
+    expect(described_class.new(schema: "нет_такой").schema).to eq("нет_такой")
+    expect { described_class.new(schema: "нет_такой").find_address_object_by_guid(street_guid) }.to raise_error(PG::UndefinedTable)
   end
 
-  describe "#find_house_by_guid" do
-    # Since test data may not have houses with GUIDs, this test might need adjustment
-    it "returns nil for non-existent house GUID" do
-      result = search.find_house_by_guid("non-existent-house-guid")
-      expect(result).to be_nil
-    end
+  it "публикует событие search.gar, если загружен ActiveSupport" do
+    events = []
+    notifications =
+      Module.new do
+        define_singleton_method(:instrument) do |name, payload, &block|
+          block.call(payload).tap { events << [name, payload] }
+        end
+      end
+    stub_const("ActiveSupport::Notifications", notifications)
+
+    search.search_address_objects("Зимняя")
+
+    expect(events).to contain_exactly(["search.gar", hash_including(method: :search_address_objects, query: "Зимняя", schema: "gar", count: 1)])
   end
 end

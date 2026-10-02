@@ -40,7 +40,7 @@ def write_sql_insert(file, table_name, records)
 end
 
 def export_test_data
-  db_conn     = Gar::Database.connection
+  db_conn     = Gar::Database.create_connection
   schema_name = Gar.configuration.database_schema
 
   puts "Exporting test data from GAR database..."
@@ -101,7 +101,7 @@ def export_test_data
     write_sql_insert(file, "houses", houses)
 
     # Get object_ids for hierarchy tables from the exported records
-    object_ids = (houses.map(&:object_id) + address_objects.map(&:object_id)).uniq.join(",")
+    object_ids = (houses + address_objects).map { _1["object_id"] }.uniq.join(",")
 
     # Export related adm_hierarchy records
     puts "Exporting related adm_hierarchy records..."

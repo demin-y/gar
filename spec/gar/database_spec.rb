@@ -1,215 +1,130 @@
 # frozen_string_literal: true
 
 RSpec.describe Gar::Database do
-  let(:logger) { instance_double(Logger, info: nil, warn: nil, error: nil, debug: nil) }
+  def backend_pid(conn) = conn.exec("SELECT pg_backend_pid()").getvalue(0, 0)
 
-  before do
-    allow(Gar).to receive(:logger).and_return(logger)
-  end
+  describe "настройка" do
+    it "без адреса базы бросает ConfigurationError с подсказкой при первом обращении" do
+      Gar.configure { _1.database_url = nil }
 
-  after do
-    # Сброс singleton-соединения между тестами
-    described_class.instance_variable_set(:@connection, nil)
-  end
-
-  describe ".connection_valid?" do
-    it "возвращает false для nil" do
-      expect(described_class.connection_valid?(nil)).to be false
+      expect { Gar::Search.new.search_houses("Ленина 10") }.to raise_error(Gar::ConfigurationError, /GAR_DATABASE_URL/)
     end
 
-    it "возвращает true для валидного соединения" do
-      conn = instance_double(PG::Connection, status: PG::CONNECTION_OK, finished?: false)
-      expect(described_class.connection_valid?(conn)).to be true
-    end
+    it "берёт адрес из GAR_DATABASE_URL, а не из DATABASE_URL приложения" do
+      stub_const("ENV", ENV.to_h.merge("DATABASE_URL" => "postgresql://app/app_db", "GAR_DATABASE_URL" => "postgresql://gar/gar_db"))
 
-    it "возвращает false для закрытого соединения" do
-      conn = instance_double(PG::Connection, status: PG::CONNECTION_OK, finished?: true)
-      expect(described_class.connection_valid?(conn)).to be false
-    end
-
-    it "возвращает false при PG::Error" do
-      conn = instance_double(PG::Connection, finished?: false)
-      allow(conn).to receive(:status).and_raise(PG::Error)
-      expect(described_class.connection_valid?(conn)).to be false
+      expect(Gar::Configuration.new.database_url).to eq("postgresql://gar/gar_db")
+      stub_const("ENV", ENV.to_h.except("GAR_DATABASE_URL"))
+      expect(Gar::Configuration.new.database_url).to be_nil
     end
   end
 
-  describe "#reconnect!" do
-    context "когда reset успешен" do
-      it "сохраняет то же соединение" do
-        conn = instance_double(PG::Connection)
-        allow(conn).to receive(:reset)
+  describe "пул соединений", :db do
+    it "выдаёт соединения пула с statement_timeout поиска, а импорту — без таймаута" do
+      Gar.configure { _1.search_statement_timeout = 0.5 }
 
-        db = described_class.new(conn)
-        db.reconnect!
+      expect(Gar.with_connection { _1.exec("SHOW statement_timeout").getvalue(0, 0) }).to eq("500ms")
+      conn = described_class.create_connection
+      expect(conn.exec("SHOW statement_timeout").getvalue(0, 0)).to eq("0")
+    ensure
+      conn&.close
+    end
 
-        expect(db.conn).to eq(conn)
-        expect(conn).to have_received(:reset)
+    it "раздаёт потокам разные соединения в пределах pool_size" do
+      Gar.configure { _1.pool_size = 3 }
+      search = Gar::Search.new
+
+      pids = Array.new(8) do
+        Thread.new { Gar.with_connection { |conn| conn.exec("SELECT pg_sleep(0.05)") && backend_pid(conn) } }
+      end.map(&:value)
+      results = Array.new(8) { Thread.new { search.search_address_objects("Зимняя").size } }.map(&:value)
+
+      expect(pids.uniq.size).to be_between(2, 3)
+      expect(results.uniq).to eq([1])
+    end
+
+    it "превращает таймаут запроса и ожидания пула в UnavailableError" do
+      Gar.configure do |config|
+        config.pool_size                = 1
+        config.pool_timeout             = 0.1
+        config.search_statement_timeout = 0.1
       end
+
+      expect { Gar.with_connection { _1.exec("SELECT pg_sleep(1)") } }.to raise_error(Gar::UnavailableError, /statement timeout/)
+      holder = Thread.new { Gar.with_connection { sleep 0.5 } }
+      sleep 0.1
+      expect { Gar.with_connection { nil } }.to raise_error(Gar::UnavailableError)
+      holder.join
+      expect(Gar.with_connection { _1.exec("SELECT 1").getvalue(0, 0) }).to eq("1")
     end
 
-    context "когда reset не удался" do
-      it "создаёт новое соединение" do
-        old_conn = instance_double(PG::Connection, finished?: false)
-        new_conn = instance_double(PG::Connection)
-        allow(old_conn).to receive(:reset).and_raise(PG::Error, "reset failed")
-        allow(old_conn).to receive(:close)
-        allow(described_class).to receive(:create_connection).and_return(new_conn)
+    it "не возвращает в пул оборванное соединение" do
+      Gar.configure { _1.pool_size = 1 }
+      first = Gar.with_connection { backend_pid(_1) }
+      db_connection.exec_params("SELECT pg_terminate_backend($1)", [first])
 
-        db = described_class.new(old_conn)
-        db.reconnect!
-
-        expect(db.conn).to eq(new_conn)
-        expect(old_conn).to have_received(:close)
-      end
-    end
-  end
-
-  describe "#ensure_alive!" do
-    it "не переподключается при живом соединении" do
-      conn = instance_double(PG::Connection)
-      allow(conn).to receive(:exec).with("SELECT 1")
-
-      db = described_class.new(conn)
-      db.ensure_alive!
-
-      expect(conn).to have_received(:exec).with("SELECT 1")
+      expect { Gar.with_connection { _1.exec("SELECT 1") } }.to raise_error(Gar::UnavailableError)
+      expect(Gar.with_connection { backend_pid(_1) }).not_to eq(first)
     end
 
-    it "переподключается при PG::ConnectionBad" do
-      conn = instance_double(PG::Connection)
-      allow(conn).to receive(:exec).with("SELECT 1").and_raise(PG::ConnectionBad)
-      allow(conn).to receive(:reset)
+    it "после fork ребёнок работает со своим соединением, а соединение родителя остаётся живым" do
+      skip "fork недоступен" unless Process.respond_to?(:fork)
+      parent = Gar.with_connection { backend_pid(_1) }
+      reader, writer = IO.pipe
 
-      db = described_class.new(conn)
-      db.ensure_alive!
-
-      expect(conn).to have_received(:reset)
-    end
-
-    it "переподключается при PG::UnableToSend" do
-      conn = instance_double(PG::Connection)
-      allow(conn).to receive(:exec).with("SELECT 1").and_raise(PG::UnableToSend)
-      allow(conn).to receive(:reset)
-
-      db = described_class.new(conn)
-      db.ensure_alive!
-
-      expect(conn).to have_received(:reset)
-    end
-  end
-
-  describe "#with_retry" do
-    let(:conn) { instance_double(PG::Connection) }
-    let(:db) { described_class.new(conn) }
-
-    before do
-      allow(conn).to receive(:reset)
-    end
-
-    it "выполняет блок без retry при успехе" do
-      result = db.with_retry(&:object_id)
-
-      expect(result).to eq(conn.object_id)
-    end
-
-    it "переподключается и повторяет при PG::ConnectionBad" do
-      call_count = 0
-      allow(db).to receive(:sleep)
-
-      result =
-        db.with_retry do |c|
-          call_count += 1
-          raise PG::ConnectionBad, "connection lost" if call_count == 1
-
-          c
+      child =
+        fork do
+          TestDatabase.discard_after_fork
+          reader.close
+          writer.write(Gar.with_connection { backend_pid(_1) })
+          writer.close
+          exit!(0) # без at_exit RSpec; финализаторы соединений всё равно отработают при выходе
         end
+      writer.close
+      Process.wait(child)
 
-      expect(result).to eq(conn)
-      expect(call_count).to eq(2)
+      expect(reader.read).not_to eq(parent)
+      expect(Gar.with_connection { backend_pid(_1) }).to eq(parent)
     end
 
-    it "переподключается и повторяет при PG::UnableToSend" do
-      call_count = 0
-      allow(db).to receive(:sleep)
+    it "соединение родителя переживает выход ребёнка, который не трогал базу" do
+      skip "fork недоступен" unless Process.respond_to?(:fork)
+      parent = Gar.with_connection { backend_pid(_1) }
 
-      db.with_retry do
-        call_count += 1
-        raise PG::UnableToSend, "unable to send" if call_count == 1
-      end
+      # Обычный выход: финализаторы унаследованных соединений отрабатывают (вывод at_exit RSpec — в /dev/null)
+      Process.wait(fork do
+        TestDatabase.discard_after_fork
+        $stdout.reopen(IO::NULL)
+        exit(0)
+      end)
 
-      expect(call_count).to eq(2)
-    end
-
-    it "выбрасывает исключение после превышения max_attempts" do
-      allow(db).to receive(:sleep)
-
-      expect do
-        db.with_retry(max_attempts: 2) do
-          raise PG::ConnectionBad, "connection lost"
-        end
-      end.to raise_error(PG::ConnectionBad)
-    end
-
-    it "использует экспоненциальный backoff" do
-      allow(db).to receive(:sleep)
-
-      call_count = 0
-      begin
-        db.with_retry(max_attempts: 3) do
-          call_count += 1
-          raise PG::ConnectionBad, "connection lost"
-        end
-      rescue PG::ConnectionBad
-        # ожидаемо
-      end
-
-      expect(db).to have_received(:sleep).with(0.5).ordered
-      expect(db).to have_received(:sleep).with(1.0).ordered
-      expect(db).to have_received(:sleep).with(2.0).ordered
-    end
-
-    it "обновляет @conn при reconnect" do
-      new_conn = instance_double(PG::Connection)
-      allow(conn).to receive(:reset).and_raise(PG::Error, "reset failed")
-      allow(conn).to receive_messages(finished?: false, close: nil)
-      allow(described_class).to receive(:create_connection).and_return(new_conn)
-      allow(db).to receive(:sleep)
-
-      call_count = 0
-      db.with_retry do
-        call_count += 1
-        raise PG::ConnectionBad, "connection lost" if call_count == 1
-      end
-
-      expect(db.conn).to eq(new_conn)
-    end
-
-    it "не ловит другие PG::Error" do
-      expect do
-        db.with_retry do
-          raise PG::Error, "some other error"
-        end
-      end.to raise_error(PG::Error, "some other error")
+      expect(Gar.with_connection { backend_pid(_1) }).to eq(parent)
     end
   end
 
-  describe "#close" do
-    it "закрывает соединение" do
-      conn = instance_double(PG::Connection, finished?: false)
-      allow(conn).to receive(:close)
-
-      db = described_class.new(conn)
-      db.close
-
-      expect(conn).to have_received(:close)
+  describe "Gar.available?", :db do
+    it "true, когда текущая схема есть и пути в ней построены" do
+      expect(Gar.available?).to be(true)
     end
 
-    it "не падает если соединение уже закрыто" do
-      conn = instance_double(PG::Connection, finished?: true)
+    it "false без текущей схемы или без путей" do
+      schema = isolated_schema("gar_empty")
+      db_connection.exec("CREATE SCHEMA #{schema}")
+      db_connection.exec(Gar::Schema.fetch(:address_objects).create_sql(schema))
 
-      db = described_class.new(conn)
-      expect { db.close }.not_to raise_error
+      Gar.configure { _1.database_schema = schema }
+      expect(Gar.available?).to be(false)
+      Gar.configure { _1.database_schema = "#{schema}_нет" }
+      expect(Gar.available?).to be(false)
+    end
+
+    it "false за connect_timeout, если база недоступна; поиск бросает UnavailableError" do
+      Gar.configure { _1.database_url = "postgresql://postgres@127.0.0.1:1/gar" }
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect(Gar.available?).to be(false)
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < Gar.configuration.connect_timeout
+      expect { Gar::Search.new.search_houses("Ленина") }.to raise_error(Gar::UnavailableError, /недоступна/)
     end
   end
 end

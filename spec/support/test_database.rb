@@ -35,6 +35,12 @@ module TestDatabase
       names&.each { |name| connection.exec("DROP SCHEMA IF EXISTS #{connection.quote_ident(name)} CASCADE") }
     end
 
+    # Соединение тестов — «соединение приложения»: в форкнутом ребёнке его отбрасывает само
+    # приложение (как Active Record), гем трогает только свои
+    def discard_after_fork
+      @connection.socket_io.reopen(IO::NULL) unless @connection.nil? || @connection.finished?
+    end
+
     def disconnect
       @connection&.close unless @connection&.finished?
       @connection = nil
