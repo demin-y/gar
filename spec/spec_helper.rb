@@ -1,92 +1,45 @@
 # frozen_string_literal: true
 
-require "bundler/setup"
-require "mini_sql"
-require "gar"
-require "pg"
-require "json"
-require_relative "support/gar_archive_helper"
-
-module IntegrationTestHelper
-  class << self
-    def database_url
-      ENV.fetch("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:6433/gar_db_test")
-    end
-
-    def setup_database
-      reset_connection
-      ensure_docker_running
-    end
-
-    def teardown_database
-      reset_connection
-      # Оставляем test БД запущенной для возможности ручной отладки
-      # Если нужно останавливать, раскомментируйте:
-      # system("docker-compose stop db-test", out: File::NULL, err: File::NULL)
-    end
-
-    def connection
-      @connection ||= PG.connect(database_url)
-    end
-
-    def reset_connection
-      @connection&.close
-      @connection = nil
-    end
-
-    private
-
-    def ensure_docker_running
-      system("docker-compose up -d db-test", out: File::NULL, err: File::NULL)
-      wait_for_database
-    end
-
-    def wait_for_database
-      max_attempts = 30
-      attempt = 0
-
-      loop do
-        attempt += 1
-        begin
-          connection.exec("SELECT 1")
-          puts "Test БД готова к работе (попытка #{attempt})"
-          break
-        rescue PG::ConnectionBad, PG::Error => e
-          @connection = nil
-
-          raise "Не удалось подключиться к test БД после #{max_attempts} попыток: #{e.message}" if attempt >= max_attempts
-
-          sleep 1
-        end
-      end
-    end
+unless ENV["COVERAGE"] == "0"
+  require "simplecov"
+  SimpleCov.start do
+    add_filter "/spec/"
+    enable_coverage :branch
   end
 end
 
+require "bundler/setup"
+require "gar"
+
+Dir[File.join(__dir__, "support/**/*.rb")].each { |file| require file }
+
 RSpec.configure do |config|
-  # Enable flags like --only-failures and --next-failure
   config.example_status_persistence_file_path = ".rspec_status"
-
-  # Disable RSpec exposing methods globally on `Module` and `main`
   config.disable_monkey_patching!
+  config.expect_with(:rspec) { |c| c.syntax = :expect }
 
-  config.expect_with :rspec do |c|
-    c.syntax = :expect
-  end
+  config.order = :random
+  Kernel.srand config.seed
 
-  # Автоматический запуск/остановка тестовой базы данных
-  config.before(:suite) do
-    IntegrationTestHelper.setup_database
-    Gar.configuration.database_url = IntegrationTestHelper.database_url
+  # :slow — средний синтетический объём; локально выключены, в CI включены (GAR_SLOW_TESTS=1)
+  config.filter_run_excluding :slow unless ENV["GAR_SLOW_TESTS"]
 
-    # Отключаем параллельный импорт в CI для стабильности тестов
-    if ENV["CI"]
-      Gar.configuration.parallel_import = false
-      puts "CI detected: parallel import disabled for test stability"
+  config.include TestDatabase::Helpers, :db
+  config.before(:context, :db) { TestDatabase.prepare! }
+  config.after(:each, :db) { TestDatabase.drop_schemas(@schemas_to_drop) }
+  config.after(:suite) { TestDatabase.disconnect }
+
+  # Каждый пример начинает со свежей конфигурацией гема
+  config.around do |example|
+    Gar.instance_variable_set(:@configuration, nil)
+    Gar.configure do |gar|
+      gar.database_url    = TestDatabase.url
+      gar.parallel_import = false # параллельный импорт проверяют отдельные примеры
+      gar.logger          = false unless ENV["GAR_TEST_LOG"]
     end
-  end
-
-  config.after(:suite) do
-    IntegrationTestHelper.teardown_database
+    example.run
+  ensure
+    Gar::Database.disconnect!
+    Gar.instance_variable_set(:@configuration, nil)
   end
 end

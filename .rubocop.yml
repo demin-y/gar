@@ -1,10 +1,11 @@
-require:
-   - rubocop-rspec
-   - rubocop-performance
+plugins:
+  - rubocop-rspec
+  - rubocop-performance
 
 AllCops:
-  TargetRubyVersion: 3.1
+  TargetRubyVersion: 3.3
   NewCops: enable
+  SuggestExtensions: false
   Exclude:
     - 'vendor/**/*'
     - 'tmp/**/*'
@@ -81,5 +82,6 @@ RSpec/MultipleExpectations:
 RSpec/MultipleMemoizedHelpers:
   Enabled: false
 
-Capybara/RSpec/PredicateMatcher:
-  Enabled: false
+RSpec/DescribeClass:
+  Exclude:
+    - 'spec/integration/**/*'

@@ -2,9 +2,9 @@
 
 require "mini_sql"
 
-RSpec.describe Gar::Search do
+RSpec.describe Gar::Search, :db do
   let(:schema_name) { "gar" }
-  let(:db_conn)     { IntegrationTestHelper.connection }
+  let(:db_conn)     { TestDatabase.connection }
   let(:search)      { described_class.new(db_conn) }
 
   before do

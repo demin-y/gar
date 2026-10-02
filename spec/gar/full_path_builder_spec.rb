@@ -438,8 +438,8 @@ RSpec.describe Gar::FullPathBuilder do
       builder.send(:create_fulltext_indexes_for_table, "address_objects")
 
       expect(db_conn).to have_received(:exec).once do |arg|
-        expect(arg).to match(/CREATE INDEX IF NOT EXISTS idx_address_objects_full_adm_path/)
-        expect(arg).to match(/CREATE INDEX IF NOT EXISTS idx_address_objects_full_mun_path/)
+        expect(arg).to include("CREATE INDEX IF NOT EXISTS idx_address_objects_full_adm_path")
+        expect(arg).to include("CREATE INDEX IF NOT EXISTS idx_address_objects_full_mun_path")
       end
     end
 
@@ -447,9 +447,9 @@ RSpec.describe Gar::FullPathBuilder do
       builder.send(:create_fulltext_indexes_for_table, "houses")
 
       expect(db_conn).to have_received(:exec).once do |arg|
-        expect(arg).to match(/full_adm_path_tsv/)
-        expect(arg).to match(/full_mun_path_tsv/)
-        expect(arg).to match(/WHERE is_active = true/)
+        expect(arg).to include("full_adm_path_tsv")
+        expect(arg).to include("full_mun_path_tsv")
+        expect(arg).to include("WHERE is_active = true")
       end
     end
   end
@@ -458,8 +458,8 @@ RSpec.describe Gar::FullPathBuilder do
   # Интеграционные тесты (с реальной БД)
   # ============================================================================
 
-  describe "интеграционные тесты", :integration do
-    let(:real_db_conn) { IntegrationTestHelper.connection }
+  describe "интеграционные тесты", :db do
+    let(:real_db_conn) { TestDatabase.connection }
     let(:test_schema) { "gar_fpb_test_#{Time.now.to_i}_#{rand(1000)}" }
     let(:real_builder) { described_class.new(real_db_conn, schema_name: test_schema) }
 
@@ -480,8 +480,6 @@ RSpec.describe Gar::FullPathBuilder do
     end
 
     def create_test_tables
-      real_db_conn.exec("SET search_path TO #{test_schema}, public")
-
       # Таблица address_objects
       real_db_conn.exec(<<-SQL)
         CREATE TABLE #{test_schema}.address_objects (
