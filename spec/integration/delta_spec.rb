@@ -71,7 +71,7 @@ RSpec.describe "Дельты", :db do
       expect(count(:addr_obj_params, "id = 2")).to eq(0)
       expect(Gar.autocomplete("Свободы 10").map(&:address)).to include("Кировская обл, Киров г, Свободы ул, д. 10")
       expect(Gar.current_version).to have_attributes(version_id: 20_260_120, version_date: Date.new(2026, 1, 20), status: "ready")
-      expect(db_connection.exec("SELECT version_id, upserted, deleted FROM #{current}.gar_updates").values).to eq([["20260120", "1", "2"]])
+      expect(described_class.history(db_connection, current)).to match([include(version_id: 20_260_120, upserted: 1, deleted: 2)])
     end
 
     it "новый дом получает путь и учитывается в числе домов улицы и города" do
@@ -167,7 +167,7 @@ RSpec.describe "Дельты", :db do
 
       expect(value("SELECT name FROM #{current}.address_objects WHERE id = 4300010")).to eq("Ленина")
       expect(Gar.current_version.version_id).to eq(20_260_116)
-      expect(Gar::Database.relation_exists?(db_connection, "#{current}.gar_updates")).to be(false)
+      expect(described_class.history(db_connection, current)).to eq([])
     end
 
     it "к схеме без путей применяет только записи: пути построит Gar.build_paths" do

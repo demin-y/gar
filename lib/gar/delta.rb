@@ -28,6 +28,17 @@ module Gar
 
     attr_reader :db_conn, :schema
 
+    # Последние применённые к схеме дельты из журнала gar_updates, новые первыми: хеши с
+    # version_id, version_date, applied_at, upserted, deleted, gem_version; [] — дельт не было
+    def self.history(conn, schema, limit: 10)
+      updates = "#{Schema.quote(schema)}.#{Schema.quote(UPDATES)}"
+      return [] unless Database.relation_exists?(conn, updates)
+
+      conn.exec_params("SELECT * FROM #{updates} ORDER BY version_id DESC LIMIT $1", [limit]).map do |row|
+        row.transform_keys(&:to_sym).merge(version_id: row["version_id"].to_i, upserted: row["upserted"].to_i, deleted: row["deleted"].to_i)
+      end
+    end
+
     def initialize(db_conn = nil, schema: Gar.configuration.database_schema)
       @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
       @schema  = schema

@@ -43,14 +43,23 @@ module Gar
       # Имя схемы импорта версии version_id
       def import_name(current, version_id) = "#{current}_v#{version_id}"
 
+      # Схемы импорта текущей current (<текущая>_v<версия>), по имени
+      def imports(conn, current) = names_with_prefix(conn, "#{current}_v").grep(/\A#{Regexp.escape(current)}_v\d+\z/).sort
+
       # Схемы импорта (<текущая>_v<версия>) не новее текущей и незавершённые: их уже не
       # переключат. Без gar_meta у текущей — только незавершённые
       def stale_imports(conn, current)
         version = Meta.read(conn, current)&.version_id
-        names_with_prefix(conn, "#{current}_v").grep(/\A#{Regexp.escape(current)}_v\d+\z/).select do |name|
+        imports(conn, current).select do |name|
           meta = Meta.read(conn, name)
           meta && (meta.status == "importing" || (version && meta.version_id <= version))
         end
+      end
+
+      # Место на диске под таблицы схемы с индексами и TOAST, байт
+      def size(conn, name)
+        conn.exec_params("SELECT COALESCE(sum(pg_total_relation_size(c.oid)), 0) FROM pg_class c " \
+                         "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'm')", [name]).getvalue(0, 0).to_i
       end
 
       # Удаляет схемы names и возвращает их
