@@ -6,44 +6,18 @@
 require "gar"
 
 Gar.configure do |config|
-  config.batch_size              = 10_000
   config.parallel_import         = true
   config.parallel_import_workers = 8
 
-  # Настройка сущностей для импорта (по умолчанию все сущности)
-  # Можно задать только необходимые сущности для импорта
-  config.import_entities = [
-    :object_levels,
-    :address_object_types,
-    :address_objects,
-    :house_types,
-    :houses,
-    :adm_hierarchy,
-    :mun_hierarchy
-  ]
+  # Состав данных: набор :minimal (по умолчанию), :extended или :full.
+  # Справочники корня архива грузятся всегда.
+  config.preset = :minimal
 
-  # Настройка параметров импорта для отдельных сущностей
-  # entity_options содержит настройки для каждой сущности отдельно
-  config.entity_options = {
-    address_objects: {
-      is_actual: true,
-      is_active: true
-    },
-    houses:          {
-      is_actual: true,
-      is_active: true
-    },
-    adm_hierarchy:   {
-      is_active: true
-    },
-    mun_hierarchy:   {
-      is_active: true
-    },
-    reestr_objects:  {
-      level:     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-      is_active: true
-    }
-  }
+  # Тонкая настройка поверх набора
+  # config.tables      += [:steads, :stead_params]  # добавить таблицы субъекта
+  # config.hierarchies  = [:adm]                    # только административная иерархия
+  # config.param_types  = [5, 7]                    # почтовый индекс и ОКТМО
+  # config.keep_history = true                      # хранить неактуальные записи
 end
 
 puts "Импорт полной базы данных GAR с созданием дублирующей схемы"
@@ -68,10 +42,10 @@ begin
   puts "Дата модификации: #{File.mtime(zip_path)}"
   puts ""
 
-  # Импортируем полную базу с созданием дублирующей схемы
-  # Информация о версии будет автоматически извлечена из архива
+  # Импортируем базу в схему gar_v<версия>; версия берётся из version.txt внутри архива.
+  # region_codes — только папки нужных субъектов (по умолчанию все)
   puts "Начинаем импорт..."
-  schema_name = importer.import_full_base(zip_path)
+  schema_name = importer.import_full_base(zip_path, region_codes: ["43", "11"])
 
   puts ""
   puts "🎉 Импорт завершен!"

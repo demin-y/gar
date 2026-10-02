@@ -230,7 +230,7 @@ make test-db-psql  # Проверить данные вручную
 
 1. **Test БД:** Fixtures автоматически загружаются
 2. **Parallel import:** `parallel_import: true` для больших импортов
-3. **Batch size:** Оптимизируйте `batch_size` для COPY операций
+3. **Объём:** импортируйте только нужное — `config.preset` и `region_codes:`
 
 ### Отладка
 

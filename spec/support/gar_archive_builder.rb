@@ -57,6 +57,7 @@ class GarArchiveBuilder
     @version   = version
     @root      = Hash.new { |hash, table| hash[table] = [] }
     @regions   = Hash.new { |hash, code| hash[code] = Hash.new { |files, table| files[table] = [] } }
+    @extra     = {}
   end
 
   def version_id
@@ -80,16 +81,24 @@ class GarArchiveBuilder
     self
   end
 
-  def write(dir, name: "gar_xml_v#{version_id}.zip")
+  # Произвольный файл архива (посторонние файлы, файлы не на своём месте)
+  def file(name, content)
+    @extra[name] = content
+    self
+  end
+
+  # version_txt: nil — архив без version.txt
+  def write(dir, name: "gar_xml_v#{version_id}.zip", version_txt: "#{version}\nv.223")
     path = File.join(dir, name)
 
     Zip::OutputStream.open(path) do |zip|
-      put(zip, "version.txt", "#{version}\nv.223")
+      put(zip, "version.txt", version_txt) if version_txt
       ROOT_FILES.each { |table, elements| put(zip, file_name(nil, table), xml(elements, @root[table])) }
 
       @regions.sort.each do |code, files|
         REGION_FILES.each { |table, elements| put(zip, file_name(code, table), xml(elements, files[table])) }
       end
+      @extra.each { |entry, content| put(zip, entry, content) }
     end
 
     path

@@ -33,5 +33,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "ox",       "~> 2.14"
   spec.add_dependency "parallel", "~> 1.26"
   spec.add_dependency "pg",       "~> 1.2"
-  spec.add_dependency "rubyzip",  "~> 2.3"
+  spec.add_dependency "rubyzip",  "~> 3.0"
 end
