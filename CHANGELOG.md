@@ -5,6 +5,23 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Перенос старых адресов (этап 7)
+
+**Несовместимые изменения**
+- В `AddressObject` добавлено поле `active`; `as_json` результатов раскрывает вложенные
+  результаты (`HouseMatch#house`, `alternatives`).
+
+**Новое**
+- `Search#find_address_objects_by_guids(guids, region_codes:, within:)` — одним запросом
+  `Hash` GUID → `AddressObject`, в том числе недействующие объекты (`active: false`) (Т10).
+- `Gar.match_house(street_guid:, number:, letter:, building:, structure:, hierarchy:)` →
+  `Gar::HouseMatch` со статусом `:exact`, `:fuzzy` или `:none` и альтернативами; несовпавший
+  или неоднозначный номер — `:none`, случайный дом не выбирается (Т11).
+- `Gar::HouseNumber` заменяет латинские буквы, похожие на русские («10a» → «10а»), и даёт
+  `HouseNumber.normalize` для частей номера.
+- `examples/verify_fias_guids.rb` — проверка GUID улиц из старых данных (AOGUID ФИАС) по ГАР:
+  TSV-отчёт «совпадает / другое название / недействует / не найден».
+
 ### Поиск для формы (этап 6)
 
 **Несовместимые изменения**

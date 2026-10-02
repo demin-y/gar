@@ -3,23 +3,33 @@
 require "json"
 
 module Gar
-  # Результаты — Data: to_h, as_json и to_json дают Hash с ключами-строками, их можно отдать
-  # в JSON как есть
+  # Результаты — Data: as_json и to_json дают Hash с ключами-строками (вложенные результаты —
+  # тоже), их можно отдать в JSON как есть
   module Serializable
-    def as_json(*) = to_h.transform_keys(&:to_s)
+    def self.json(value)
+      case value
+      when Serializable then value.as_json
+      when Array then value.map { json(_1) }
+      else value
+      end
+    end
+
+    def as_json(*) = to_h.to_h { |key, value| [key.to_s, Serializable.json(value)] }
     def to_json(*) = as_json.to_json(*)
   end
 
   # Адресный объект (регион, город, улица…) в результатах поиска. gar_object_id — OBJECTID ГАР
   # (устойчивый идентификатор объекта; object_id занят Ruby), id — идентификатор записи,
-  # region_code — код субъекта («43»)
+  # region_code — код субъекта («43»), active — объект действует (недействующие отдаёт только
+  # Search#find_address_objects_by_guids)
   AddressObject =
-    Data.define(:id, :gar_object_id, :object_guid, :name, :type_name, :level, :region_code, :full_adm_path, :full_mun_path) do
+    Data.define(:id, :gar_object_id, :object_guid, :name, :type_name, :level, :region_code, :active, :full_adm_path,
+                :full_mun_path) do
       include Serializable
 
       def self.from_row(row)
         new(id: row["id"].to_i, gar_object_id: row["object_id"].to_i, object_guid: row["object_guid"], name: row["name"],
-            type_name: row["type_name"], level: row["level"]&.to_i, region_code: row["region_code"],
+            type_name: row["type_name"], level: row["level"]&.to_i, region_code: row["region_code"], active: row["is_active"] == "t",
             full_adm_path: row["full_adm_path"], full_mun_path: row["full_mun_path"])
       end
     end
@@ -40,6 +50,15 @@ module Gar
   # элемент («Ленина ул», «д. 10»), address — полный путь по иерархии запроса
   Suggestion =
     Data.define(:kind, :object_guid, :gar_object_id, :level, :region_code, :name, :address) do
+      include Serializable
+    end
+
+  # Дом, сопоставленный старой записи адреса (Gar.match_house): status — :exact (номер, корпус
+  # и строение совпали), :fuzzy (единственный дом с тем же номером, у которого есть корпус или
+  # строение сверх записанных) или :none; house — найденный Gar::House или nil; alternatives —
+  # другие дома улицы с тем же числом в номере («10а», «10/2» для «10»)
+  HouseMatch =
+    Data.define(:status, :house, :alternatives) do
       include Serializable
     end
 

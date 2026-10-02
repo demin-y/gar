@@ -20,6 +20,7 @@ RSpec.describe Gar::Autocomplete, :db do
   it "учитывает корпус и строение и границы поиска" do
     expect(suggest("Ленина 14 корп 1 стр 3").first.gar_object_id).to eq(4_300_106)
     expect(suggest("Ленина 12 к2").first.gar_object_id).to eq(4_300_104)
+    expect(suggest("Ленина 10a").first.gar_object_id).to eq(4_300_102) # латинская «a»
     expect(suggest("Ленина 10", within: guid(1_100_003)).map(&:gar_object_id)).to eq([1_100_101, 1_100_010])
   end
 
