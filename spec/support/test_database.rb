@@ -72,6 +72,10 @@ module TestDatabase
       db_connection.exec_params("SELECT 1 FROM pg_namespace WHERE nspname = $1", [name]).ntuples.positive?
     end
 
+    def tables_in(schema)
+      db_connection.exec_params("SELECT tablename FROM pg_tables WHERE schemaname = $1", [schema]).column_values(0).map(&:to_sym)
+    end
+
     def table_count(schema, table)
       db_connection.exec("SELECT COUNT(*) FROM #{db_connection.quote_ident(schema)}.#{table}").getvalue(0, 0).to_i
     end

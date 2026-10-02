@@ -319,6 +319,7 @@ RSpec.describe Gar::FullPathBuilder do
     before do
       allow(builder).to receive(:populate_address_objects_adm_paths)
       allow(builder).to receive(:populate_address_objects_mun_paths)
+      allow(builder).to receive(:table_exists?).and_return(true)
     end
 
     it "вызывает populate_address_objects_adm_paths сначала" do
@@ -338,6 +339,7 @@ RSpec.describe Gar::FullPathBuilder do
     before do
       allow(builder).to receive(:populate_houses_adm_paths)
       allow(builder).to receive(:populate_houses_mun_paths)
+      allow(builder).to receive(:table_exists?).and_return(true)
     end
 
     it "вызывает populate_houses_adm_paths сначала" do

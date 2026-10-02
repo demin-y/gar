@@ -53,16 +53,16 @@ module Gar
       create_fulltext_indexes_for_table(table_name)
     end
 
-    # Заполняет колонки для всех адресных объектов
+    # Заполняет колонки для всех адресных объектов по загруженным иерархиям
     def populate_address_objects_paths(batch_size: 50_000)
-      populate_address_objects_adm_paths(batch_size:)
-      populate_address_objects_mun_paths(batch_size:)
+      populate_address_objects_adm_paths(batch_size:) if hierarchy_loaded?(:adm)
+      populate_address_objects_mun_paths(batch_size:) if hierarchy_loaded?(:mun)
     end
 
-    # Заполняет колонки для всех домов
+    # Заполняет колонки для всех домов по загруженным иерархиям
     def populate_houses_paths(batch_size: 25_000)
-      populate_houses_adm_paths(batch_size:)
-      populate_houses_mun_paths(batch_size:)
+      populate_houses_adm_paths(batch_size:) if hierarchy_loaded?(:adm)
+      populate_houses_mun_paths(batch_size:) if hierarchy_loaded?(:mun)
     end
 
     # Заполняет только adm_path для address_objects
@@ -301,6 +301,13 @@ module Gar
       end
 
       logger.info "Заполнение #{path_column} для #{table_name} завершено"
+    end
+
+    # Иерархию можно не загружать (config.hierarchies): пути по ней тогда не строятся
+    def hierarchy_loaded?(type)
+      table_exists?(Utils.full_table_name("#{type}_hierarchy", schema_name:)).tap do |loaded|
+        logger.info "Таблицы #{type}_hierarchy нет: пути #{type} не строятся" unless loaded
+      end
     end
 
     def add_column_if_not_exists(full_table_name, column_name, column_type = "TEXT")

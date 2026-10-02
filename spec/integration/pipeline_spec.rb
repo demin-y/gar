@@ -1,15 +1,12 @@
 # frozen_string_literal: true
 
-require "fileutils"
-require "tmpdir"
-
-# Сквозная характеризация 1.0.0: архив → импорт → пути → поиск → переключение схем.
-# Страховочная сетка рефакторинга. Ошибки из анализа (docs/rails_integration_plan.md) описаны
-# как pending с номером: после исправления pending-пример «упадёт» — пометку нужно снять.
+# Сквозной конвейер: архив → импорт → пути → поиск → переключение схем. Страховочная сетка
+# рефакторинга (заведена в этапе 0 как характеризация 1.0.0). Ошибки из анализа
+# (docs/rails_integration_plan.md) описаны как pending с номером: после исправления
+# pending-пример «упадёт» — пометку нужно снять.
 RSpec.describe "Конвейер ГАР на синтетическом архиве", :db do
-  let(:archive)       { GarSampleArchive.build }
-  let(:archive_dir)   { Dir.mktmpdir("gar_pipeline") }
-  let(:zip_path)      { archive.write(archive_dir) }
+  include_context "с синтетическим архивом"
+
   let(:importer)      { Gar::Importer.new(db_connection) }
   let(:import_schema) { "gar_v20260116" }
 
@@ -32,27 +29,28 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
   before { register_schema_for_cleanup(import_schema) }
 
-  after { FileUtils.rm_rf(archive_dir) }
-
   describe "импорт" do
-    it "создаёт версионную схему со всеми таблицами import_entities" do
+    it "создаёт версионную схему со справочниками и таблицами минимального набора" do
       expect(importer.import_full_base(zip_path)).to eq("gar_v20260116")
 
-      counts = Gar.configuration.import_entities.to_h { |table| [table, table_count(import_schema, table)] }
+      counts = Gar.configuration.import_tables.to_h { |table| [table.name, table_count(import_schema, table.name)] }
       expect(counts).to eq(
-        object_levels: 5, address_object_types: 6, address_objects: 12, house_types: 2, houses: 10,
-        reestr_objects: 21, adm_hierarchy: 19, mun_hierarchy: 21, param_types: 4, params: 0
+        object_levels: 5, address_object_types: 6, house_types: 2, add_house_types: 2, apartment_types: 0, room_types: 0,
+        operation_types: 0, param_types: 4, normative_docs_kinds: 0, normative_docs_types: 0,
+        address_objects: 11, addr_obj_params: 2, adm_hierarchy: 19, mun_hierarchy: 21, houses: 10, house_params: 3
       )
     end
 
-    it "загружает все субъекты архива: фильтра по субъектам нет (Т5)" do
+    it "проставляет код субъекта из имени папки, в том числе в муниципальной иерархии" do
       importer.import_full_base(zip_path)
 
-      regions = db_connection.exec("SELECT DISTINCT region_code FROM #{import_schema}.adm_hierarchy").map { |row| row["region_code"] }
-      expect(regions).to contain_exactly("43", "11", "77")
+      ["address_objects", "houses", "adm_hierarchy", "mun_hierarchy"].each do |table|
+        regions = db_connection.exec("SELECT DISTINCT region_code FROM #{import_schema}.#{table}").column_values(0)
+        expect(regions).to contain_exactly("43", "11", "77")
+      end
     end
 
-    it "сохраняет версию в database_version и не оставляет распакованных файлов" do
+    it "сохраняет версию в database_version и не распаковывает архив на диск" do
       importer.import_full_base(zip_path)
 
       version = db_connection.exec("SELECT version_id FROM #{import_schema}.database_version").getvalue(0, 0)
@@ -60,21 +58,11 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(Dir.children(archive_dir)).to eq([File.basename(zip_path)])
     end
 
-    it "без entity_options загружает исторические и неактивные записи" do
+    it "загружает только актуальные записи, недействующие объекты оставляет" do
       importer.import_full_base(zip_path)
 
-      names = column_by_object(import_schema, "address_objects", "name").values
-      expect(names).to include("Старая")
+      expect(column_by_object(import_schema, "address_objects", "name").values).not_to include("Старая")
       expect(column_by_object(import_schema, "houses", "is_active")[4_300_107]).to eq("f")
-    end
-
-    it "с entity_options отбрасывает неактуальные и неактивные записи" do
-      Gar.configuration.entity_options = { address_objects: { is_actual: true }, houses: { is_active: true } }
-
-      importer.import_full_base(zip_path)
-
-      expect(table_count(import_schema, "address_objects")).to eq(11)
-      expect(table_count(import_schema, "houses")).to eq(9)
     end
 
     it "после параллельного импорта в процессах соединение родителя остаётся рабочим" do
@@ -89,31 +77,28 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(table_count(import_schema, "houses")).to eq(10)
     end
 
-    it "импортирует параметры из файлов *_PARAMS" do
-      pending "Ошибка 2: ключ AS_PARAM находит только AS_PARAM_TYPES, таблица params пуста"
+    it "импортирует действующие параметры нужных типов из файлов *_PARAMS (ошибка 2)" do
       importer.import_full_base(zip_path)
 
-      expect(table_count(import_schema, "params")).to be_positive
+      expect(column_by_object(import_schema, "addr_obj_params", "value")).to eq(4_300_001 => "Кировская область", 4_300_010 => "610000")
+      expect(table_count(import_schema, "house_params")).to eq(3)
     end
 
-    it "берёт версию из version.txt, а не из имени zip" do
-      pending "Ошибка 6: версия извлекается из имени файла, для gar_xml.zip получается gar_v0"
-      register_schema_for_cleanup("gar_v0")
-      zip = archive.write(archive_dir, name: "gar_xml.zip")
+    it "берёт версию из version.txt, а не из имени zip (ошибка 6)" do
+      zip = archive_builder.write(archive_dir, name: "gar_xml.zip")
 
       expect(importer.import_full_base(zip)).to eq("gar_v20260116")
     end
 
-    it "не удаляет текущую схему при импорте той же версии" do
-      pending "Ошибка 7: import_full_base начинает с DROP SCHEMA gar_v<версия>, даже если это текущая схема"
-      Gar.configuration.database_schema = import_schema
+    it "не удаляет текущую схему при импорте той же версии (ошибка 7)" do
       importer.import_full_base(zip_path)
+      Gar.configuration.database_schema = import_schema
 
-      expect { importer.import_full_base(zip_path) }.to raise_error(Gar::Error)
+      expect { importer.import_full_base(zip_path) }.to raise_error(Gar::ImportError, /текущая/)
+      expect(table_count(import_schema, "houses")).to eq(10)
     end
 
-    it "не использует обрезанный файл, оставшийся от прерванного импорта" do
-      pending "Ошибка 4: entry.extract пропускается, если файл уже существует"
+    it "не использует остатки распаковки прерванного импорта 1.x (ошибка 4)" do
       entry = Zip::File.open(zip_path) { |zip| zip.entries.map(&:name).find { |name| name.start_with?("43/AS_HOUSES_2") } }
       leftover = File.join(archive_dir, File.basename(zip_path, ".zip"), entry)
       FileUtils.mkdir_p(File.dirname(leftover))
@@ -143,6 +128,14 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(adm[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
       expect(adm[4_300_103]).to eq("Кировская обл, Киров г, Ленина ул, д. 10/2")
       expect(adm[4_300_104]).to eq("Кировская обл, Киров г, Ленина ул, д. 12") # корпус 2 теряется (Т8, этап 4)
+    end
+
+    it "без муниципальной иерархии строит только административные пути" do
+      Gar.configuration.hierarchies = [:adm]
+      schema = import_with_paths
+
+      expect(column_by_object(schema, "houses", "full_adm_path")[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
+      expect(column_by_object(schema, "houses", "full_mun_path").values.uniq).to eq([nil])
     end
 
     it "использует текущее название улицы в путях её домов" do

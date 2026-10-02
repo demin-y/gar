@@ -31,10 +31,9 @@ RSpec.configure do |config|
   end
   config.after(:each, :db) { TestDatabase.drop_schemas(@schemas_to_drop) }
 
-  # Каждый пример начинает со свежей конфигурацией гема.
-  # TODO(этап 1): публичный Gar.reset_configuration! вместо записи во внутреннюю переменную
+  # Каждый пример начинает со свежей конфигурацией гема
   config.before do
-    Gar.instance_variable_set(:@configuration, nil)
+    Gar.reset_configuration!
     Gar.configure do |gar|
       gar.database_url    = TestDatabase.url
       gar.parallel_import = false # параллельный импорт проверяют отдельные примеры

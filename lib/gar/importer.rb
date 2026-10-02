@@ -1,53 +1,45 @@
 # frozen_string_literal: true
 
-require "zip"
-require "fileutils"
 require "parallel"
-require_relative "xml_parser"
-require_relative "entities/entities"
-require_relative "full_path_builder"
 
 module Gar
+  # Импорт архива ГАР в версионную схему gar_v<версия>.
+  #
+  # Схема создаётся заново (текущую импорт не трогает), таблицы — без ключей и индексов.
+  # Файлы таблиц читаются потоком из zip одной очередью работ «таблица × субъект», крупные
+  # первыми, и параллельно загружаются через COPY. Затем строятся первичные ключи и индексы
+  # и собирается статистика. Состав данных — Configuration#import_tables, фильтры — keep_history
+  # и param_types.
   class Importer
     include Loggable
 
-    COPY_ESCAPE_REGEX = /[\\\t\n\r]/
-    COPY_ESCAPE_CHARS = { "\\" => "\\\\", "\t" => "\\t", "\n" => "\\n", "\r" => "\\r" }.freeze
-
-    attr_reader :db
+    attr_reader :db_conn
 
     def initialize(db_conn = nil)
-      @db = Gar::Database.new(db_conn)
-      log_connection_info("Инициализировано соединение")
+      @db_conn = db_conn || Database.create_connection
     end
 
-    def db_conn
-      db.conn
-    end
+    # Возвращает имя схемы с данными. region_codes — коды субъектов (папки архива), по умолчанию
+    # все; on_progress — ->(done, total, stage): байты разобранного XML, stage = :import.
+    # Ошибки базы и файлов приходят как ImportError; незавершённая схема остаётся до повторного
+    # импорта, который создаст её заново.
+    def import_full_base(zip_path, schema: nil, region_codes: nil, on_progress: nil)
+      archive = Archive.new(zip_path)
+      schema ||= "gar_v#{archive.version_id}"
+      tables   = Gar.configuration.import_tables
+      jobs     = archive.jobs(tables, region_codes:)
 
-    def import_full_base(zip_path)
-      version_id = extract_version_from_archive(zip_path)
-      logger.info "Начинаем импорт полной базы данных GAR версии #{version_id}"
-
-      schema_name = "gar_v#{version_id}"
-
-      drop_schema(schema_name)
-      create_schema(schema_name)
-      create_tables(schema_name)
-      logger.info "Создана схема #{schema_name} с таблицами"
-
-      save_version_info(schema_name, version_id)
-      logger.info "Информация о версии сохранена"
-
-      logger.info "Импорт данных в схему #{schema_name}..."
-      import_tables(zip_path, schema_name)
-      logger.info "Импорт завершен успешно! Новая схема: #{schema_name}"
-
-      schema_name
-    rescue StandardError => e
-      logger.error "Ошибка импорта: #{e.message}"
-      logger.error "Схема #{schema_name} оставлена для анализа. Удалите вручную: DROP SCHEMA #{schema_name} CASCADE"
-      raise e
+      logger.info "Импорт ГАР версии #{archive.version_id} в схему #{schema}: #{jobs.size} файлов, #{megabytes(jobs.sum(&:size))} XML"
+      warn_missing_regions(jobs, region_codes)
+      create_schema(schema, tables)
+      load_data(archive, jobs, schema, on_progress)
+      loaded = jobs.group_by(&:table).transform_values { |table_jobs| table_jobs.sum(&:size) }
+      build_indexes(schema, tables.sort_by { -loaded.fetch(_1, 0) })
+      save_version_info(schema, archive.version_id)
+      logger.info "Импорт завершён: схема #{schema}"
+      schema
+    rescue PG::Error, SystemCallError, IOError => e
+      raise ImportError, "Ошибка импорта в схему #{schema}: #{e.message}"
     end
 
     def find_latest_full_base_zip(directory: nil)
@@ -57,375 +49,168 @@ module Gar
       Dir.glob(File.join(target_dir, "*.zip")).max_by { |f| File.mtime(f) }
     end
 
+    # Делает схему текущей (database_schema); прежняя текущая становится резервной
+    # gar_backup_v<версия>. Переименования идут в одной транзакции: читатели видят либо
+    # старую, либо новую схему.
     def switch_to_imported_schema(new_schema_name)
-      raise ArgumentError, "Имя новой схемы не может быть пустым" if new_schema_name.empty?
+      raise ArgumentError, "Имя новой схемы не может быть пустым" if new_schema_name.to_s.empty?
       raise ArgumentError, "Схема #{new_schema_name} не существует" unless schema_exists?(new_schema_name)
 
       current_schema = Gar.configuration.database_schema
       return logger.info "Новая схема уже является текущей" if new_schema_name == current_schema
 
-      backup_current_schema(current_schema)
-
-      logger.info "Переименование схемы #{new_schema_name} в #{current_schema}..."
-      rename_schema(new_schema_name, current_schema)
-      logger.info "Новая схема установлена как текущая: #{current_schema}"
-    end
-
-    def extract_version_from_archive(zip_path)
-      File.basename(zip_path)[/_v(\d+)\.zip$/, 1].to_i
-    end
-
-    def create_schema(schema_name)
-      return unless schema_name
-
-      db_conn.exec("CREATE SCHEMA #{db_conn.quote_ident(schema_name)}")
-      logger.info "Создана схема #{schema_name}"
-    rescue StandardError => e
-      logger.error "Ошибка создания схемы #{schema_name}: #{e.message}"
-      raise e
-    end
-
-    def drop_schema(schema_name)
-      return unless schema_name
-
-      db_conn.exec("DROP SCHEMA IF EXISTS #{db_conn.quote_ident(schema_name)} CASCADE")
-    rescue StandardError => e
-      logger.error "Ошибка при удалении схемы #{schema_name}: #{e.message}"
-    end
-
-    def create_tables(schema_name = nil)
-      Gar.configuration.import_entities.each do |table_name|
-        table_module = Gar::Entities.get_table_module(table_name)
-        next unless table_module
-
-        full_table_name = full_table_name(table_name, schema_name)
-        schema_sql      = table_module::SCHEMA % full_table_name
-
-        db_conn.exec(schema_sql)
-        logger.info "Создана таблица #{full_table_name}"
-      rescue StandardError => e
-        logger.error "Ошибка создания таблицы #{full_table_name}: #{e.message}"
-        raise e
+      db_conn.transaction do
+        backup_current_schema(current_schema)
+        rename_schema(new_schema_name, current_schema)
       end
+      logger.info "Новая схема установлена как текущая: #{current_schema}"
     end
 
     private
 
-    # Схемы
+    def create_schema(schema, tables)
+      raise ImportError, "Схема #{schema} — текущая (database_schema): импорт в неё запрещён" if schema == Gar.configuration.database_schema
+
+      logger.warn "Схема #{schema} осталась от прерванного импорта и будет создана заново" if schema_exists?(schema)
+      db_conn.transaction do |conn|
+        conn.exec("DROP SCHEMA IF EXISTS #{quote(schema)} CASCADE")
+        conn.exec("CREATE SCHEMA #{quote(schema)}")
+        tables.each { conn.exec(_1.create_sql(schema)) }
+      end
+    end
+
+    # Версия записывается последней: схема без неё — незавершённый импорт
+    def save_version_info(schema, version_id)
+      db_conn.exec("CREATE TABLE #{version_table(schema)} (version_id integer PRIMARY KEY, import_date timestamp DEFAULT CURRENT_TIMESTAMP)")
+      db_conn.exec_params("INSERT INTO #{version_table(schema)} (version_id) VALUES ($1)", [version_id])
+    end
+
+    def load_data(archive, jobs, schema, on_progress)
+      total = jobs.sum(&:size)
+      done  = 0
+      on_progress&.call(done, total, :import)
+
+      each_loaded(archive, jobs, schema) do |job, count|
+        done += job.size
+        logger.info "  #{job}: #{count} записей, #{megabytes(job.size)} (#{total.zero? ? 100 : done * 100 / total}%)"
+        on_progress&.call(done, total, :import)
+      end
+    end
+
+    # Загружает файлы параллельно или по очереди; блок вызывается в этом процессе после
+    # каждого загруженного файла с числом записей
+    def each_loaded(archive, jobs, schema)
+      if Gar.configuration.parallel_import && jobs.size > 1
+        parent_pid = Process.pid
+        Parallel.each(jobs, **parallel_options, finish: ->(job, _index, count) { yield job, count }) do |job|
+          Database.discard_inherited_connections(parent_pid)
+          with_worker_connection { |conn| load_job(conn, archive, job, schema) }
+        end
+      else
+        jobs.each { |job| yield job, load_job(db_conn, archive, job, schema) }
+      end
+    rescue Parallel::DeadWorker
+      raise ImportError, "Воркер импорта аварийно завершился — возможно, не хватило памяти. " \
+                         "Уменьшите parallel_import_workers или отключите parallel_import"
+    end
+
+    # Один файл — одна команда COPY в своей транзакции; возвращает число загруженных записей.
+    # Ошибка — ImportError с именем файла: её можно передать из воркер-процесса в родителя
+    def load_job(conn, archive, job, schema)
+      reader = XmlReader.new(job.table, filters: filters_for(job.table), region_code: job.region_code)
+      count  = 0
+
+      conn.transaction do
+        conn.exec("SET LOCAL synchronous_commit TO off")
+        conn.copy_data(job.table.copy_sql(schema)) do
+          count = archive.stream(job) { |io| reader.read(io) { |chunk| conn.put_copy_data(chunk) } }
+        end
+      end
+      count
+    rescue StandardError => e
+      raise ImportError, "Ошибка импорта файла #{job}: #{e.message}"
+    end
+
+    # Отбор записей при разборе: только актуальные (без keep_history) и нужные типы параметров
+    def filters_for(table)
+      config  = Gar.configuration
+      filters = table.actual && !config.keep_history?(table.name) ? table.actual.dup : {}
+      filters["TYPEID"] = Set.new(config.param_types.map(&:to_s)) if table.params? && config.param_types != :all
+      filters
+    end
+
+    # Ключи и индексы после загрузки: так COPY не тратит время на их поддержку. Таблицы
+    # независимы, при parallel_import они обрабатываются параллельно, крупные первыми; работа
+    # идёт на сервере, поэтому хватает потоков. Память сервера — до maintenance_work_mem на
+    # каждый воркер; задаётся, только если указан import_maintenance_work_mem.
+    def build_indexes(schema, tables)
+      if Gar.configuration.parallel_import && tables.size > 1
+        Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers) do |table|
+          with_worker_connection { |conn| build_table_indexes(conn, schema, table) }
+        end
+      else
+        tables.each { |table| build_table_indexes(db_conn, schema, table) }
+      end
+    end
+
+    def build_table_indexes(conn, schema, table)
+      memory = Gar.configuration.import_maintenance_work_mem
+      logger.info "  Ключи, индексы и статистика: #{table.name}"
+      conn.transaction do
+        conn.exec("SET LOCAL maintenance_work_mem TO #{conn.escape_literal(memory)}") if memory
+        table.index_sqls(schema).each { conn.exec(_1) }
+        conn.exec("ANALYZE #{table.qualified_name(schema)}")
+      end
+    end
+
+    def parallel_options
+      workers = Gar.configuration.parallel_import_workers
+      Gar.configuration.parallel_import_strategy == :threads ? { in_threads: workers } : { in_processes: workers }
+    end
+
+    # У каждого воркера своё соединение: PG::Connection нельзя делить между потоками и процессами
+    def with_worker_connection
+      conn = Database.create_connection
+      yield conn
+    ensure
+      conn&.close
+    end
+
+    def warn_missing_regions(jobs, region_codes)
+      missing = Array(region_codes).map(&:to_s) - jobs.filter_map(&:region_code)
+      logger.warn "В архиве нет папок субъектов: #{missing.join(', ')}" if missing.any?
+    end
+
     def schema_exists?(schema_name)
-      db_conn.exec_params("SELECT * FROM information_schema.schemata WHERE schema_name = $1 LIMIT 1", [schema_name]).any?
+      db_conn.exec_params("SELECT 1 FROM pg_namespace WHERE nspname = $1", [schema_name]).ntuples.positive?
     end
 
     def rename_schema(old_name, new_name)
-      db_conn.exec("ALTER SCHEMA #{db_conn.quote_ident(old_name)} RENAME TO #{db_conn.quote_ident(new_name)}")
-    end
-
-    def get_database_version(schema_name)
-      result =
-        db.with_retry do |conn|
-          conn.exec("SELECT version_id FROM #{db_conn.quote_ident(schema_name)}.database_version ORDER BY version_id DESC LIMIT 1")
-        end
-      result.ntuples.positive? ? result.getvalue(0, 0) : nil
+      db_conn.exec("ALTER SCHEMA #{quote(old_name)} RENAME TO #{quote(new_name)}")
     end
 
     def backup_current_schema(current_schema)
       return unless schema_exists?(current_schema)
 
-      version        = get_database_version(current_schema)
-      version_suffix = version ? "v#{version}" : Time.now.strftime("%Y%m%d_%H%M%S")
-      backup_name    = "gar_backup_#{version_suffix}"
+      version     = database_version(current_schema)
+      backup_name = "gar_backup_#{version ? "v#{version}" : Time.now.strftime('%Y%m%d_%H%M%S')}"
 
-      drop_schema(backup_name) if schema_exists?(backup_name)
+      db_conn.exec("DROP SCHEMA IF EXISTS #{quote(backup_name)} CASCADE")
       rename_schema(current_schema, backup_name)
-
       logger.info "Текущая схема #{current_schema} переименована в #{backup_name}"
-    rescue StandardError
-      logger.info "Текущая схема #{current_schema} не существует, пропускаем backup"
     end
 
-    # Индексы
-    def create_indexes(schema_name = nil)
-      all_indexes = collect_all_indexes(schema_name)
-      return if all_indexes.empty?
+    # Версия из database_version; nil, если схема создана не импортом гема или импорт не завершён
+    def database_version(schema_name)
+      return unless db_conn.exec_params("SELECT to_regclass($1)", [version_table(schema_name)]).getvalue(0, 0)
 
-      total = all_indexes.size
-      logger.info "Создание #{total} индексов"
-      create_indexes_sequential(all_indexes)
-      logger.info "Создано #{total} индексов"
+      db_conn.exec("SELECT max(version_id) FROM #{version_table(schema_name)}").getvalue(0, 0)
     end
 
-    def create_indexes_parallel(all_indexes)
-      execute_in_parallel(all_indexes) do |db, index_sql|
-        db.with_retry do |conn|
-          conn.exec(index_sql)
-        end
-      end
-    end
+    def version_table(schema) = "#{quote(schema)}.database_version"
 
-    def create_indexes_sequential(all_indexes)
-      total = all_indexes.size
+    def quote(identifier) = Schema.quote(identifier)
 
-      all_indexes.each_with_index do |index_sql, index|
-        db.with_retry do |conn|
-          conn.exec(index_sql)
-        end
-        log_progress(index + 1, total)
-      end
-    end
-
-    def collect_all_indexes(schema_name)
-      Gar.configuration.import_entities.flat_map do |table_name|
-        table_module = Gar::Entities.get_table_module(table_name)
-        next [] unless table_module
-
-        full_table_name = full_table_name(table_name, schema_name)
-        table_module::INDEXES.map { |tpl| tpl % full_table_name }
-      end
-    end
-
-    # Импорт данных
-    def import_tables(zip_path, schema_name)
-      import_list  = build_import_list
-      total_tables = import_list.length
-
-      import_list.each_with_index do |table_info, index|
-        import_table(zip_path, schema_name, table_info, index + 1, total_tables)
-      end
-
-      create_indexes(schema_name)
-      logger.info "Индексы созданы"
-    ensure
-      cleanup_extracted_files(zip_path)
-    end
-
-    def import_table(zip_path, schema_name, table_info, processed, total)
-      table_name = table_info[:table]
-      table_key = table_info[:key]
-
-      db.ensure_alive!
-
-      logger.info "[#{processed}/#{total}] Импорт таблицы #{schema_name}.#{table_name}..."
-
-      xml_files = extract_xml_for_table(zip_path, table_key)
-      if xml_files.empty?
-        logger.warn "Файлы для таблицы #{table_name} не найдены, пропускаем"
-        return
-      end
-
-      import_xml_files_for_table(xml_files, table_name, schema_name)
-      logger.info "Файлы таблицы #{table_name} обработаны"
-    rescue StandardError => e
-      logger.error "Ошибка импорта таблицы #{table_name}: #{e.message}"
-      raise e
-    end
-
-    def import_xml_files_for_table(xml_files, table_name, schema_name)
-      return if xml_files.empty?
-
-      logger.info "  Обработка #{xml_files.length} XML файлов..."
-
-      if parallel_import_enabled? && xml_files.size > 1
-        import_files_parallel(xml_files, table_name, schema_name)
-      else
-        import_files_sequential(xml_files, table_name, schema_name)
-      end
-
-      logger.info "  Все #{xml_files.length} файлов обработаны"
-    end
-
-    def parallel_import_enabled?
-      Gar.configuration.parallel_import
-    end
-
-    def import_files_parallel(xml_files, table_name, schema_name)
-      execute_in_parallel(xml_files) do |db, xml_path|
-        import_single_file(xml_path, table_name, schema_name, db)
-      end
-    end
-
-    def import_files_sequential(xml_files, table_name, schema_name)
-      total = xml_files.size
-
-      xml_files.each_with_index do |xml_path, index|
-        import_single_file(xml_path, table_name, schema_name, @db)
-        log_progress(index + 1, total)
-      end
-    end
-
-    def import_single_file(xml_path, table_name, schema_name, db)
-      parser  = Gar::XmlParser.new
-      options = build_parser_options(table_name)
-
-      parser.parse_and_yield(xml_path:, table_name:, options:) do |batch, headers|
-        copy_batch_data(db, batch, headers, table_name, schema_name)
-      end
-    end
-
-    # Общая логика параллельного выполнения
-    def execute_in_parallel(items)
-      total = items.size
-      return if total.zero?
-
-      workers_count    = Gar.configuration.parallel_import_workers
-      parallel_options = build_parallel_options(workers_count, total)
-
-      Parallel.each(items, **parallel_options) do |item|
-        worker_db = Gar::Database.new
-        yield(worker_db, item)
-        nil # Prevent returning PG::Result (cannot be marshalled between processes)
-      ensure
-        worker_db&.close
-      end
-    end
-
-    def build_parallel_options(workers_count, total)
-      progress       = 0
-      progress_mutex = Mutex.new
-
-      base_options =
-        if Gar.configuration.parallel_import_strategy == :threads
-          { in_threads: workers_count }
-        else
-          { in_processes: workers_count }
-        end
-
-      # finish callback вызывается в главном процессе после завершения КАЖДОГО item
-      base_options[:finish] =
-        lambda do |_item, _index, _result|
-          progress_mutex.synchronize do
-            progress += 1
-            log_progress(progress, total)
-          end
-        end
-
-      base_options
-    end
-
-    def split_into_chunks(array, num_chunks)
-      chunk_size = (array.size.to_f / num_chunks).ceil
-      array.each_slice(chunk_size).to_a
-    end
-
-    def copy_batch_data(db, batch, headers, table_name, schema_name = nil)
-      return if batch.empty?
-
-      db.with_retry do |conn|
-        full_table_name = full_table_name(table_name, schema_name)
-        quoted_headers  = headers.map { db_conn.quote_ident(_1.to_s) }.join(",")
-
-        conn.copy_data("COPY #{full_table_name} (#{quoted_headers}) FROM STDIN") do
-          batch.each do |record|
-            values = headers.map { format_value_for_copy(record[_1]) }
-            conn.put_copy_data("#{values.join("\t")}\n")
-          end
-        end
-      end
-    rescue StandardError => e
-      logger.error "Ошибка групповой записи: #{e.message}"
-      raise e
-    end
-
-    def format_value_for_copy(value)
-      case value
-      when nil then "\\N"
-      when true then "t"
-      when false then "f"
-      when Integer, Float then value.to_s
-      when DateTime, Time then value.strftime("%Y-%m-%d %H:%M:%S")
-      when Date then value.strftime("%Y-%m-%d")
-      else
-        str = value.to_s
-        str.match?(COPY_ESCAPE_REGEX) ? str.gsub(COPY_ESCAPE_REGEX, COPY_ESCAPE_CHARS) : str
-      end
-    end
-
-    # Работа с файлами
-    def extract_xml_for_table(zip_path, table_key)
-      extract_dir = File.join(File.dirname(zip_path), File.basename(zip_path, ".*"))
-      FileUtils.mkdir_p(extract_dir)
-
-      xml_files = []
-
-      Zip::File.open(zip_path) do |zip_file|
-        zip_file.each do |entry|
-          next unless entry.name.downcase.end_with?(".xml")
-          next unless entry.name.include?(table_key)
-
-          # Путь для извлечения
-          extract_path = File.join(extract_dir, entry.name)
-          FileUtils.mkdir_p(File.dirname(extract_path))
-
-          entry.extract(extract_path) unless File.exist?(extract_path)
-          xml_files << extract_path
-        end
-      end
-
-      xml_files
-    end
-
-    def cleanup_extracted_files(zip_path)
-      extract_dir = File.join(File.dirname(zip_path), File.basename(zip_path, ".zip"))
-      return unless Dir.exist?(extract_dir)
-
-      FileUtils.rm_rf(extract_dir)
-      logger.debug "Директория #{extract_dir} удалена"
-    end
-
-    # Вспомогательные методы
-    def save_version_info(schema_name, version_id)
-      table_name = full_table_name("database_version", schema_name)
-
-      db.with_retry do |conn|
-        conn.exec <<-SQL
-          CREATE TABLE IF NOT EXISTS #{table_name} (
-            version_id INTEGER PRIMARY KEY,
-            import_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        SQL
-
-        conn.exec_params("INSERT INTO #{table_name} (version_id) VALUES ($1)", [version_id])
-      end
-    end
-
-    def build_import_list
-      Gar.configuration.import_entities.filter_map do |table_name|
-        table_module = Gar::Entities.get_table_module(table_name)
-        next unless table_module
-
-        { table: table_name, key: table_module::XML_KEY }
-      end
-    end
-
-    def build_parser_options(table_name)
-      table_module = Gar::Entities.get_table_module(table_name)
-      return {} unless table_module
-
-      # Используем настройки из entity_options для данной таблицы
-      table_options = Gar.configuration.entity_options&.[](table_name) || {}
-
-      # Объединяем с дефолтными настройками из модуля если они есть
-      default_options = table_module.const_defined?(:DEFAULT_PARSER_OPTIONS) ? table_module::DEFAULT_PARSER_OPTIONS : {}
-      default_options.merge(table_options)
-    end
-
-    def full_table_name(name, schema_name)
-      schema_name ? "#{schema_name}.#{name}" : name.to_s
-    end
-
-    def log_connection_info(message)
-      pid = db_conn.respond_to?(:backend_pid) ? " (PID: #{db_conn.backend_pid})" : ""
-      logger.debug "#{message}#{pid}"
-    rescue StandardError
-      logger.debug message
-    end
-
-    # Логировать каждые 10% или первый/последний файл
-    def log_progress(processed, total)
-      progress_percent = (processed.to_f / total * 100).to_i
-      prev_percent     = ((processed - 1).to_f / total * 100).to_i
-      return unless processed == 1 || progress_percent / 10 != prev_percent / 10 || processed == total
-
-      logger.info "    Прогресс: #{processed}/#{total} файлов (#{progress_percent}%)"
-    end
+    def megabytes(bytes) = format("%.1f МБ", bytes / 1_048_576.0)
   end
 end

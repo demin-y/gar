@@ -157,30 +157,42 @@ importer.switch_to_imported_schema(schema_name)
 
 ```ruby
 Gar.configure do |config|
-  # Размер батча для COPY операций
-  config.batch_size = 10_000
-
-  # Параллельный импорт
+  # Параллельный импорт: одна очередь файлов «таблица × субъект», крупные первыми
   config.parallel_import = true
   config.parallel_import_workers = 8
 
-  # Выбор сущностей для импорта
-  config.import_entities = [
-    :object_levels,
-    :address_object_types,
-    :address_objects,
-    :house_types,
-    :houses,
-    :adm_hierarchy,
-    :mun_hierarchy
-  ]
+  # Состав данных: :minimal (по умолчанию) — то, что нужно поиску и адресной строке;
+  # :extended — плюс участки, помещения, реестр GUID и прежние названия улиц; :full — весь архив.
+  # Справочники корня архива грузятся всегда.
+  config.preset = :minimal
 
-  # Фильтрация данных при импорте
-  config.entity_options = {
-    address_objects: { is_actual: true, is_active: true },
-    houses: { is_actual: true, is_active: true },
-    adm_hierarchy: { is_active: true }
-  }
+  # Тонкая настройка поверх набора
+  config.tables += [:steads]        # добавить таблицы субъекта
+  config.hierarchies = [:adm]       # только административная иерархия
+  config.param_types = [5, 6, 7]    # типы параметров: почтовый индекс, ОКАТО, ОКТМО
+  config.keep_history = true        # хранить неактуальные записи
+end
+
+# Только папки нужных субъектов (по умолчанию все)
+importer.import_full_base(zip_path, region_codes: ["43", "11"])
+```
+
+XML читается потоком прямо из zip: распаковка на диск не нужна, целостность каждого файла
+проверяется по CRC32 из оглавления. Версия берётся из `version.txt` внутри архива. Первичные
+ключи и индексы строятся после загрузки данных, по таблицам параллельно.
+
+**Память.** Воркер импорта занимает около 45 МБ (из них ~40 МБ — сам Ruby с гемами) и не
+растёт с размером файла: даже файл на 4,8 ГБ читается кусками по 64 КБ. На Linux воркеры —
+процессы, форкнутые от запустившего импорт процесса, поэтому запускайте импорт отдельной
+задачей (rake, фоновый воркер), а не в процессе веб-сервера. На сервере с малым объёмом памяти:
+
+```ruby
+Gar.configure do |config|
+  config.parallel_import_workers = 2   # по умолчанию — число ядер, но не больше 4
+  # config.parallel_import = false     # совсем без воркеров: медленнее, минимум памяти
+  # Память PostgreSQL на построение индексов: до этого объёма на каждый воркер.
+  # По умолчанию не задаётся — действует настройка сервера.
+  # config.import_maintenance_work_mem = "256MB"
 end
 ```
 
@@ -254,17 +266,18 @@ hierarchy = search.get_hierarchy(address.id, hierarchy_type: :adm)
 
 ## Схема базы данных
 
-Gem создает следующие таблицы в PostgreSQL:
+Gem создает в схеме по таблице на каждый файл архива ГАР (описание — `Gar::Schema`).
+Набор `:minimal` по умолчанию:
 
-- `reestr_objects` - Реестр всех адресных объектов
-- `address_objects` - Адресные объекты (регионы, города, улицы)
-- `houses` - Здания и сооружения
-- `mun_hierarchy` - Муниципальная иерархия
-- `adm_hierarchy` - Административная иерархия
-- `address_object_types` - Типы адресных объектов
-- `house_types` - Типы зданий
-- `object_levels` - Уровни адресных объектов
-- `params` - Дополнительные параметры
+- `address_objects` — адресные объекты (регионы, города, улицы)
+- `houses` — здания и сооружения, с дополнительными номерами (корпус, строение)
+- `adm_hierarchy`, `mun_hierarchy` — административная и муниципальная иерархии
+- `addr_obj_params`, `house_params` — параметры объектов и домов (индекс, ОКАТО, ОКТМО…)
+- справочники: `object_levels`, `address_object_types`, `house_types`, `add_house_types`,
+  `param_types`, `operation_types`, `apartment_types`, `room_types`, `normative_docs_kinds`,
+  `normative_docs_types`
+
+У объектов и иерархий есть колонка `region_code` — код субъекта из имени папки архива.
 
 ## Источники данных
 
