@@ -26,7 +26,8 @@ module Gar
     # объекты с большим числом домов («Киров» — город раньше деревень «Кировский»), затем
     # регионы, районы, города, населённые пункты и улицы
     RANK_ORDER = "ao.is_capital IS TRUE DESC, ao.house_count DESC NULLS LAST, array_position(ARRAY[1, 2, 5, 6, 7, 8], ao.level), ao.name"
-    ADDRESS_OBJECT_COLUMNS = "ao.id, ao.object_id, ao.object_guid, ao.name, ao.type_name, ao.level, ao.region_code, ao.full_adm_path, ao.full_mun_path"
+    ADDRESS_OBJECT_COLUMNS = "ao.id, ao.object_id, ao.object_guid, ao.name, ao.type_name, ao.level, ao.region_code, ao.is_active, " \
+                             "ao.full_adm_path, ao.full_mun_path"
     HOUSE_COLUMNS          = "h.id, h.object_id, h.object_guid, h.house_num, ht.short_name AS house_type, h.region_code, " \
                              "h.full_adm_path, h.full_mun_path"
 
@@ -95,7 +96,7 @@ module Gar
           SELECT #{HOUSE_COLUMNS}
           FROM #{table(:houses)} h
           CROSS JOIN to_tsquery('russian', #{sql.bind(synonyms.tsquery(words, prefix: autocomplete))}) q
-          LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type
+          #{house_type_joins}
           WHERE h.is_active AND #{path} @@ q #{sql.bounds('h')}
           ORDER BY ts_rank_cd(#{path}, q) DESC, h.house_num
           #{sql.page(limit, offset)}
@@ -131,7 +132,7 @@ module Gar
           SELECT #{HOUSE_COLUMNS}
           FROM #{sql.children(parent_guid)}
           JOIN #{table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
-          LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type
+          #{house_type_joins}
           WHERE true #{sql.bounds('h')}
           ORDER BY h.house_num_norm
           #{sql.page(limit, offset)}
@@ -151,13 +152,32 @@ module Gar
       end.first
     end
 
+    # Адресные объекты по списку GUID одним запросом (Т10): Hash GUID (как передан) → AddressObject.
+    # Отдаёт и недействующие объекты (active: false): старый GUID мог перестать действовать.
+    # GUID, которых нет в базе или вне границ, в ответе нет; within: находит только действующие
+    def find_address_objects_by_guids(guids, **scope)
+      wanted = Array(guids).map(&:to_s).grep(UUID).uniq
+      return {} if wanted.empty?
+
+      rows =
+        query(AddressObject, :find_address_objects_by_guids, { count: wanted.size }, **scope) do |sql|
+          <<~SQL
+            SELECT DISTINCT ON (ao.object_guid) #{ADDRESS_OBJECT_COLUMNS} FROM #{table(:address_objects)} ao
+            WHERE ao.object_guid = ANY(#{sql.bind_array(wanted, :uuid)}) #{sql.bounds('ao')}
+            ORDER BY ao.object_guid, ao.is_actual DESC, ao.is_active DESC, ao.id DESC
+          SQL
+        end
+      found = rows.to_h { [_1.object_guid, _1] }
+      wanted.to_h { [_1, found[_1.downcase]] }.compact
+    end
+
     def find_house_by_guid(guid, **scope)
       return unless guid.to_s.match?(UUID)
 
       query(House, :find_house_by_guid, { guid: }, **scope) do |sql|
         <<~SQL
           SELECT #{HOUSE_COLUMNS} FROM #{table(:houses)} h
-          LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type
+          #{house_type_joins}
           WHERE h.object_guid = #{sql.bind(guid)} AND h.is_active #{sql.bounds('h')}
           LIMIT 1
         SQL
@@ -202,6 +222,13 @@ module Gar
       return if Database.relation_exists?(conn, name)
 
       raise ConfigurationError, "Иерархия #{hierarchy} не загружена: в схеме #{schema} нет таблицы #{name}"
+    end
+
+    # Типы дома (h): основной (ht) и дополнительные (a1, a2) — краткие и полные имена
+    def house_type_joins
+      "LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type " \
+        "LEFT JOIN #{table(:add_house_types)} a1 ON a1.id = h.add_type1 " \
+        "LEFT JOIN #{table(:add_house_types)} a2 ON a2.id = h.add_type2"
     end
 
     def hierarchy_table(hierarchy) = table(Configuration::HIERARCHY_TABLES.fetch(hierarchy))

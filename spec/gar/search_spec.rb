@@ -92,6 +92,17 @@ RSpec.describe Gar::Search, :db do
       expect(search.find_address_object_by_guid("не guid")).to be_nil
       expect(search.find_houses("не guid")).to eq([])
     end
+
+    it "по списку GUID отдаёт Hash одним запросом, в том числе недействующие объекты (Т10)" do
+      closed = Gar::TestSupport::Sample.guid(4_300_014)
+      found  = search.find_address_objects_by_guids([street_guid, closed, Gar::TestSupport::Sample.guid(1), "не guid", street_guid])
+
+      expect(found.keys).to eq([street_guid, closed])
+      expect(found[street_guid]).to have_attributes(name: "Воровского", active: true)
+      expect(found[closed]).to have_attributes(name: "Заводская", active: false, full_adm_path: nil)
+      expect(search.find_address_objects_by_guids([street_guid, closed], region_codes: ["11"])).to eq({})
+      expect(search.find_address_objects_by_guids([])).to eq({})
+    end
   end
 
   it "отвергает неизвестную иерархию" do

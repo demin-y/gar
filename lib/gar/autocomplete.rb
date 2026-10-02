@@ -50,15 +50,14 @@ module Gar
         parts =
           HouseNumber::TYPES.filter_map do |part, type|
             value = number.public_send(part) or next
-            "AND ((lower(a1.name) = '#{type}' AND h.add_num1 = #{sql.bind(value)}) OR (lower(a2.name) = '#{type}' AND h.add_num2 = #{sql.bind(value)}))"
+            "AND ((lower(a1.name) = '#{type}' AND lower(h.add_num1) = #{sql.bind(value)}) " \
+              "OR (lower(a2.name) = '#{type}' AND lower(h.add_num2) = #{sql.bind(value)}))"
           end
         <<~SQL
           SELECT #{Search::HOUSE_COLUMNS}
           FROM #{sql.hierarchy_table} hier
           JOIN #{search.table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
-          LEFT JOIN #{search.table(:house_types)} ht ON ht.id = h.house_type
-          LEFT JOIN #{search.table(:add_house_types)} a1 ON a1.id = h.add_type1
-          LEFT JOIN #{search.table(:add_house_types)} a2 ON a2.id = h.add_type2
+          #{search.house_type_joins}
           WHERE hier.is_active AND hier.parent_obj_id = ANY(#{ids})
             AND starts_with(h.house_num_norm, #{exact}) #{parts.join(' ')}
           ORDER BY h.house_num_norm = #{exact} DESC, (h.add_num1 IS NULL AND h.add_num2 IS NULL) DESC,

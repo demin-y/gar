@@ -52,10 +52,7 @@ module Gar
         UNION ALL
         SELECT h.object_id, h.object_guid, #{HOUSE_LEVEL}, h.region_code, true, h.house_num, h.add_num1, h.add_num2,
                ht.name, ht.short_name, a1.name, a1.short_name, a2.name, a2.short_name
-        FROM #{table(:houses)} h
-        LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type
-        LEFT JOIN #{table(:add_house_types)} a1 ON a1.id = h.add_type1
-        LEFT JOIN #{table(:add_house_types)} a2 ON a2.id = h.add_type2
+        FROM #{table(:houses)} h #{search.house_type_joins}
         WHERE h.object_guid = $1 AND h.is_active
         LIMIT 1
       SQL

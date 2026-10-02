@@ -11,6 +11,8 @@ module Gar
   autoload :AddressObject,   "gar/results"
   autoload :Autocomplete,    "gar/autocomplete"
   autoload :House,           "gar/results"
+  autoload :HouseMatch,      "gar/results"
+  autoload :HouseMatcher,    "gar/house_matcher"
   autoload :HouseNumber,     "gar/house_number"
   autoload :Archive,         "gar/archive"
   autoload :Configuration,   "gar/configuration"
@@ -55,6 +57,12 @@ module Gar
     # Разобранный адрес объекта или дома по GUID (Т8) — Gar::Address со строкой по правилам ФНС;
     # nil, если действующего объекта с таким GUID нет
     def address(guid, hierarchy: nil) = AddressBuilder.new.call(guid, hierarchy:)
+
+    # Дом из старой записи адреса по GUID улицы и номеру (Т11) — Gar::HouseMatch со статусом
+    # :exact, :fuzzy или :none и альтернативами; см. Gar::HouseMatcher
+    def match_house(street_guid:, number:, letter: nil, building: nil, structure: nil, hierarchy: nil)
+      HouseMatcher.new.call(street_guid:, number:, letter:, building:, structure:, hierarchy:)
+    end
 
     # Соединение из пула поиска на время блока; недоступная база — UnavailableError
     def with_connection(&) = Database.with_connection(&)

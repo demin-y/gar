@@ -251,8 +251,10 @@ module Gar
         text :house_num, :add_num1, :add_num2
         integer :house_type, :add_type1, :add_type2, :oper_type_id
         paths
-        # Номер для сравнения: без пробелов, в нижнем регистре, ё → е («10 А» → «10а»)
-        generated :house_num_norm, :text, "translate(lower(regexp_replace(house_num, '\\s+', '', 'g')), 'ё', 'е')"
+        # Номер для сравнения (как Gar::HouseNumber): без пробелов, в нижнем регистре, ё → е,
+        # латинские буквы, похожие на русские, — русские («10 А», «10a» → «10а»)
+        generated :house_num_norm, :text,
+                  "translate(lower(regexp_replace(house_num, '\\s+', '', 'g')), 'ё#{HouseNumber::LATIN}', 'е#{HouseNumber::CYRILLIC}')"
       end,
       params_table(:house_params, "HOUSES_PARAMS", postal_code: true),
       object_table(:steads, "STEADS", "STEAD") do

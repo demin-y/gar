@@ -350,12 +350,14 @@ streets = search.find_address_objects(level: 8, within: city_guid)
 houses  = search.find_houses(street_guid, limit: 50)
 
 search.find_address_object_by_guid(guid)
+search.find_address_objects_by_guids(guids) # => { guid => AddressObject }, одним запросом
 search.find_house_by_guid(guid)
 ```
 
 Результаты — `Gar::AddressObject` и `Gar::House` (`Data`): `id`, `gar_object_id` (OBJECTID
 ГАР), `object_guid`, название или номер и тип, `region_code`, `full_adm_path`, `full_mun_path`;
-у адресного объекта ещё `level`. Схема — `config.database_schema` или
+у адресного объекта ещё `level` и `active` (недействующие объекты отдаёт только
+`find_address_objects_by_guids`). Схема — `config.database_schema` или
 `Gar::Search.new(schema: …)`.
 
 Общие параметры всех методов поиска и `Gar.autocomplete`:
@@ -364,6 +366,39 @@ search.find_house_by_guid(guid)
   `Gar::ConfigurationError`, а не отвечает пустым списком;
 - `region_codes:` — только объекты этих субъектов (`%w[43 11]`);
 - `within:` — GUID субъекта, района или города: только его поддерево по иерархии запроса.
+
+**Перенос старых адресов.** GUID улицы ФИАС (`AOGUID`) в ГАР сохранён как `OBJECTGUID`
+объекта — по описанию формата ФНС. Проверить это на своих данных:
+
+```bash
+GAR_DATABASE_URL=postgresql://… ruby examples/verify_fias_guids.rb streets.csv > report.tsv
+```
+
+Вход — файл, где в каждой строке GUID улицы и её старое название (разделитель любой); отчёт —
+TSV с итогом по каждому GUID: «совпадает», «другое название» (переименование или чужой GUID),
+«недействует», «не найден», сводка — в stderr. Пакетом GUID ищет
+`search.find_address_objects_by_guids` (одним запросом на пачку).
+
+Дом из старой записи — по GUID улицы и номеру:
+
+```ruby
+Gar.match_house(street_guid:, number: "12", building: "2")
+# => #<data Gar::HouseMatch status=:exact, house=#<data Gar::House house_num="12", …>, alternatives=[…]>
+Gar.match_house(street_guid:, number: "12 корп. 2")  # то же
+Gar.match_house(street_guid:, number: "10", letter: "А")
+```
+
+Номер записи и номера домов приводятся к одному виду: регистр, пробелы, латинские буквы вместо
+похожих русских, литера (`letter:` или дополнительный тип «литера») — часть номера, корпус и
+строение — из `building:`/`structure:` или из самого номера («12к2»). Статус:
+- `:exact` — совпали номер, корпус и строение;
+- `:fuzzy` — с тем же номером ровно один дом, у которого есть всё записанное и что-то сверх
+  него (записано «14», в ГАР — «14 к. 1 стр. 3»);
+- `:none` — иначе, в том числе если подходят несколько домов («12» при «12 к. 2» и
+  «12 стр. 1»): случайный дом не выбирается.
+
+`alternatives` — другие действующие дома улицы с тем же числом в номере (для «10» — «10а»,
+«10/2»): их можно показать оператору для ручного выбора.
 
 **Текстовый запрос.** Регистр, `ё`, точки и знаки препинания не важны. Каждое слово ищется
 вместе с синонимами (`Gar::Synonyms`), поэтому «просп. Октябрьский» находит «Октябрьский

@@ -66,7 +66,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "address_objects")).to eq(21)
+      expect(table_count(schema, "address_objects")).to eq(22)
       expect(values("addr_obj_params")).to eq(["1", "2", "3", "4", "31"])
     end
 
@@ -121,7 +121,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
       expect(hierarchy_objects.call).to be_empty
-      expect(table_count(schema, "adm_hierarchy")).to eq(26)
+      expect(table_count(schema, "adm_hierarchy")).to eq(27)
 
       Gar.configuration.preset = :extended
       import
@@ -140,7 +140,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([18, 11, 26, 3])
+      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([19, 12, 27, 3])
     end
   end
 
@@ -200,7 +200,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "houses")).to eq(11)
+      expect(table_count(schema, "houses")).to eq(12)
     end
 
     it "на повреждённом файле бросает ImportError с именем файла" do
@@ -237,8 +237,8 @@ RSpec.describe Gar::Importer, :db do
       importer.switch_to_imported_schema(import)
       importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
 
-      expect(table_count(current, "houses")).to eq(11)
-      expect(table_count(backup, "houses")).to eq(11)
+      expect(table_count(current, "houses")).to eq(12)
+      expect(table_count(backup, "houses")).to eq(12)
       expect(schema_exists?(schema)).to be(false)
     end
 
