@@ -28,8 +28,8 @@ module Gar
                   :api_read_timeout, :database_url, :database_schema, :api_all_versions_url,
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
-                  :search_statement_timeout
-    attr_reader   :preset, :hierarchies
+                  :search_statement_timeout, :prune_hierarchy
+    attr_reader   :preset, :hierarchies, :region_codes
 
     def initialize
       # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
@@ -45,6 +45,10 @@ module Gar
       @api_latest_version_url      = "https://fias.nalog.ru/WebServices/Public/GetLastDownloadFileInfo"
       @preset                      = :minimal
       @hierarchies                 = HIERARCHY_TABLES.keys
+      @region_codes                = [].freeze
+      # После загрузки в иерархиях остаются строки только загруженных объектов: без участков,
+      # помещений и машино-мест минимального набора они в несколько раз меньше
+      @prune_hierarchy             = true
       @logger                      = nil
       @parallel_import             = true
       @parallel_import_workers     = [Etc.nprocessors, 4].min
@@ -79,6 +83,19 @@ module Gar
       raise ConfigurationError, "Нужна хотя бы одна иерархия: adm или mun" if names.empty?
 
       @hierarchies = names
+    end
+
+    # Коды субъектов — папки архива: %w[43 11] или [43, 11]. Пустой список — все субъекты
+    def region_codes=(codes)
+      @region_codes = self.class.region_codes(codes)
+    end
+
+    # Коды субъектов в виде папок архива: 43 → "43", 1 → "01"; неверный код — ConfigurationError
+    def self.region_codes(codes)
+      Array(codes).map do |code|
+        text = code.is_a?(Integer) ? format("%02d", code) : code.to_s
+        text.match?(/\A\d{2}\z/) ? text : raise(ConfigurationError, "Код субъекта — две цифры, как папка архива (\"43\", \"01\"): #{code.inspect}")
+      end.uniq.freeze
     end
 
     # Типы параметров объектов (AS_PARAM_TYPES); :all — все типы

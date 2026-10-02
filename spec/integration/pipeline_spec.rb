@@ -46,11 +46,10 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       end
     end
 
-    it "сохраняет версию в database_version и не распаковывает архив на диск" do
+    it "сохраняет версию в gar_meta и не распаковывает архив на диск" do
       importer.import_full_base(zip_path)
 
-      version = db_connection.exec("SELECT version_id FROM #{import_schema}.database_version").getvalue(0, 0)
-      expect(version).to eq("20260116")
+      expect(Gar::Meta.read(db_connection, import_schema)).to have_attributes(version_id: 20_260_116, status: "imported")
       expect(Dir.children(archive_dir)).to eq([File.basename(zip_path)])
     end
 
@@ -118,20 +117,32 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(adm[4_300_002]).to be_nil # городской округ есть только в муниципальной иерархии
     end
 
-    it "строит пути домов с коротким типом дома, без корпуса и строения" do
+    it "строит пути домов с коротким типом дома, корпусом и строением (Т8)" do
       adm = column_by_object(schema, "houses", "full_adm_path")
 
       expect(adm[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
       expect(adm[4_300_103]).to eq("Кировская обл, Киров г, Ленина ул, д. 10/2")
-      expect(adm[4_300_104]).to eq("Кировская обл, Киров г, Ленина ул, д. 12") # корпус 2 теряется (Т8, этап 4)
+      expect(adm[4_300_104]).to eq("Кировская обл, Киров г, Ленина ул, д. 12 к. 2")
+      expect(adm[4_300_105]).to eq("Кировская обл, Киров г, Ленина ул, д. 12 стр. 1")
+      expect(adm[4_300_106]).to eq("Кировская обл, Киров г, Ленина ул, д. 14 к. 1 стр. 3")
     end
 
-    it "без муниципальной иерархии строит только административные пути" do
+    it "отмечает дома города по OBJECTID в пути (задел под поиск в границах, Т6)" do
+      in_kirov = db_connection.exec("SELECT object_id FROM #{schema}.houses WHERE mun_path_ids @> ARRAY[4300002::bigint]")
+
+      expect(in_kirov.column_values(0).map(&:to_i)).to contain_exactly(*(4_300_101..4_300_107), 4_300_201)
+    end
+
+    it "без муниципальной иерархии строит только административные пути, а поиск по ней — ошибка настройки" do
       Gar.configuration.hierarchies = [:adm]
       schema = import_with_paths
+      search = Gar::Search.new(db_connection, schema:)
 
       expect(column_by_object(schema, "houses", "full_adm_path")[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
       expect(column_by_object(schema, "houses", "full_mun_path").values.uniq).to eq([nil])
+      expect(search.search_houses("Ленина 10").size).to eq(2)
+      expect { search.search_houses("Ленина 10", path_type: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
+      expect { search.find_houses(guid(4_300_010), path_type: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
     end
 
     it "использует текущее название улицы в путях её домов" do
@@ -163,7 +174,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
     end
 
     it "в режиме автодополнения ищет номер по префиксу и пропускает неактивные дома" do
-      expect(search.search_houses("Ленина 1", autocomplete: true).map(&:gar_id))
+      expect(search.search_houses("Ленина 1", autocomplete: true).map(&:gar_object_id))
         .to contain_exactly(1_100_101, 4_300_101, 4_300_102, 4_300_103, 4_300_104, 4_300_105, 4_300_106)
     end
 

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "date"
 require "zip"
 require "zlib"
 
@@ -131,6 +132,9 @@ module Gar
           date.captures.join.to_i
         end
     end
+
+    # Дата выгрузки (Date) — из той же версии
+    def version_date = Date.strptime(version_id.to_s, "%Y%m%d")
 
     # Работы импорта для таблиц (Schema::Table): справочники корня и таблицы субъектов —
     # всех или только region_codes. Крупные файлы первыми: так параллельный импорт не ждёт

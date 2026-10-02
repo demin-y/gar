@@ -20,7 +20,7 @@ RSpec.describe Gar::Importer, :db do
     it "по умолчанию загружает справочники и минимальный набор таблиц субъекта" do
       expect(import).to eq(schema)
 
-      expect(tables_in(schema)).to match_array(dictionaries + Gar::Configuration::MINIMAL_TABLES + [:database_version])
+      expect(tables_in(schema)).to match_array(dictionaries + Gar::Configuration::MINIMAL_TABLES + [:gar_meta])
     end
 
     it "набором :extended добавляет участки, помещения, реестр GUID и прежние названия улиц" do
@@ -39,7 +39,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(tables_in(schema)).to match_array(Gar::Schema::TABLES.keys + [:database_version])
+      expect(tables_in(schema)).to match_array(Gar::Schema::TABLES.keys + [:gar_meta])
       expect(table_count(schema, "stead_params")).to eq(1)
       expect(values("addr_obj_params")).to eq(["1", "2", "3"])
       expect(table_count(schema, "change_history")).to eq(1)
@@ -87,6 +87,52 @@ RSpec.describe Gar::Importer, :db do
       expect(table_count(schema, "house_types")).to eq(2)
     end
 
+    it "по config.region_codes не читает файлы других субъектов (Т5)" do
+      # Файл субъекта 77 испорчен: импорт упал бы, если бы его прочитал
+      archive_builder.file("77/AS_HOUSES_20260115_broken.XML", "<HOUSES><HOUSE")
+      Gar.configuration.region_codes = [43, "11"]
+      progress = []
+
+      import(on_progress: ->(done, total, _stage) { progress << [done, total] })
+
+      expect(values("houses", "region_code")).to eq(["11", "43"])
+      expect(values("address_objects", "region_code")).to eq(["11", "43"])
+      expect(table_count(schema, "address_object_types")).to eq(6)
+      expected = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables, region_codes: ["43", "11"]).sum(&:size)
+      expect(progress.last).to eq([expected, expected])
+    end
+
+    it "отвергает код субъекта не из двух цифр" do
+      expect { import(region_codes: ["4"]) }.to raise_error(Gar::ConfigurationError, /две цифры/)
+      expect(schema_exists?(schema)).to be(false)
+    end
+
+    it "берёт только действующие параметры: не закрытые изменением и не истёкшие к дате выгрузки" do
+      import
+
+      expect(values("house_params", "value")).to eq(["33701000001", "610017"])
+      Gar.configuration.keep_history = true
+      import
+      expect(values("house_params", "value")).to include("33401000000")
+    end
+
+    it "оставляет в иерархиях только загруженные объекты, если не отключён prune_hierarchy" do
+      hierarchy_objects = -> { values("adm_hierarchy", "object_id").map(&:to_i) & [4_300_901, 4_300_902] }
+
+      import
+      expect(hierarchy_objects.call).to be_empty
+      expect(table_count(schema, "adm_hierarchy")).to eq(19)
+
+      Gar.configuration.preset = :extended
+      import
+      expect(hierarchy_objects.call).to eq([4_300_901, 4_300_902])
+
+      Gar.configuration.preset          = :minimal
+      Gar.configuration.prune_hierarchy = false
+      import
+      expect(hierarchy_objects.call).to eq([4_300_901, 4_300_902])
+    end
+
     it "загружает таблицы и в параллельных потоках" do
       Gar.configuration.parallel_import          = true
       Gar.configuration.parallel_import_strategy = :threads
@@ -98,6 +144,25 @@ RSpec.describe Gar::Importer, :db do
   end
 
   describe "#import_full_base: после загрузки" do
+    it "записывает в gar_meta версию, настройки импорта и статус imported" do
+      Gar.configuration.param_types = [5, 7]
+
+      import(region_codes: ["43"])
+
+      expect(Gar::Meta.read(db_connection, schema)).to have_attributes(
+        version_id: 20_260_116, version_date: Date.new(2026, 1, 16), region_codes: ["43"], param_types: [5, 7],
+        tables: Gar.configuration.import_tables.map(&:name), keep_history: [], prune_hierarchy: true,
+        status: "imported", imported_at: be_within(60).of(Time.now), paths_built_at: nil, gem_version: Gar::VERSION
+      )
+    end
+
+    it "оставляет схему в статусе importing, если импорт прервался" do
+      archive_builder.file("43/AS_HOUSES_20260115_broken.XML", "<HOUSES><HOUSE")
+
+      expect { import }.to raise_error(Gar::ImportError)
+      expect(Gar::Meta.read(db_connection, schema)).to have_attributes(status: "importing", imported_at: nil)
+    end
+
     it "строит первичные ключи и индексы по описанию схемы и собирает статистику" do
       import
 
@@ -176,7 +241,7 @@ RSpec.describe Gar::Importer, :db do
       expect(schema_exists?(schema)).to be(false)
     end
 
-    it "резервную копию схемы без database_version называет по времени" do
+    it "резервную копию схемы без gar_meta называет по времени" do
       db_connection.exec("CREATE SCHEMA #{current}")
       before = db_connection.exec("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gar\\_backup\\_2%'").column_values(0)
 

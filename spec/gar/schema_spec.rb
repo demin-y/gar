@@ -31,10 +31,11 @@ RSpec.describe Gar::Schema do
   describe "SQL" do
     let(:houses) { described_class.fetch(:houses) }
 
-    it "создаёт таблицу с колонками XML, кодом субъекта и производными колонками путей" do
+    it "создаёт таблицу с колонками XML, кодом субъекта, производными колонками путей и вычисляемым номером" do
       expect(houses.create_sql("gar_v1")).to start_with('CREATE TABLE "gar_v1"."houses" ("id" bigint, ')
         .and include('"object_guid" uuid', '"add_num1" text', '"is_active" boolean, "region_code" text, "full_adm_path" text')
-        .and end_with('"full_mun_path_tsv" tsvector)')
+        .and include('"full_mun_path_tsv" tsvector, "adm_path_ids" bigint[], "mun_path_ids" bigint[]')
+        .and end_with('"house_num_norm" text GENERATED ALWAYS AS (translate(lower(regexp_replace(house_num, \'\\s+\', \'\', \'g\')), \'ё\', \'е\')) STORED)')
     end
 
     it "загружает COPY колонки XML и код субъекта, но не производные" do

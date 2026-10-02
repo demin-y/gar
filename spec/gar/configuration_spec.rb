@@ -70,6 +70,20 @@ RSpec.describe Gar::Configuration do
       expect { config.keep_history = [:reestr_objects] }.to raise_error(Gar::ConfigurationError, /reestr_objects/)
       expect { config.param_types = ["индекс"] }.to raise_error(Gar::ConfigurationError, /индекс/)
     end
+
+    it "по умолчанию грузит все субъекты и подрезает иерархии под загруженные объекты" do
+      expect(config.region_codes).to eq([])
+      expect(config.prune_hierarchy).to be(true)
+    end
+
+    it "приводит коды субъектов к именам папок архива и отвергает остальные" do
+      config.region_codes = [43, "11", 1, "43"]
+      expect(config.region_codes).to eq(["43", "11", "01"])
+
+      ["4", "043", "Киров", 100].each do |code|
+        expect { config.region_codes = [code] }.to raise_error(Gar::ConfigurationError, /две цифры.*#{Regexp.escape(code.inspect)}/)
+      end
+    end
   end
 
   describe "логгер" do

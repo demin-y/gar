@@ -14,10 +14,16 @@ module Gar
 
     def self.quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
 
+    # generated — выражение вычисляемой колонки (GENERATED ALWAYS AS … STORED)
     Column =
-      Data.define(:name, :type) do
+      Data.define(:name, :type, :generated) do
+        def initialize(name:, type:, generated: nil) = super
+
         def attribute = name.to_s.delete("_").upcase
-        def definition = "#{Schema.quote(name)} #{type}"
+
+        def definition
+          "#{Schema.quote(name)} #{type}#{" GENERATED ALWAYS AS (#{generated}) STORED" if generated}"
+        end
       end
 
     Index = Data.define(:name, :definition)
@@ -26,7 +32,8 @@ module Gar
 
     # file    — ключ в имени файла архива: AS_<file>_<дата>_<guid>.XML;
     # element — элемент XML с одной записью;
-    # columns — колонки из атрибутов XML; derived — колонки, которые заполняет построитель путей;
+    # columns — колонки из атрибутов XML; derived — производные: пути (заполняет построитель
+    #           путей) и вычисляемые колонки;
     # actual  — условие актуальной записи (атрибут → значение); без keep_history остальные
     #           записи при разборе отбрасываются;
     # ignored — атрибуты XML, которые не храним (с пояснением в описании таблицы)
@@ -39,6 +46,9 @@ module Gar
         def copy_columns = region_code ? [*columns, REGION_CODE] : columns
 
         def params? = element == "PARAM"
+
+        # Таблица с путями по иерархиям (их строит PathBuilder)
+        def paths? = derived.any? { _1.name == :full_adm_path }
 
         def create_sql(schema)
           "CREATE TABLE #{qualified_name(schema)} (#{[*copy_columns, *derived].map(&:definition).join(', ')})"
@@ -110,10 +120,17 @@ module Gar
         index :object_guid
       end
 
-      # Полные пути и их tsvector: заполняет построитель путей
+      # Полные пути, их tsvector и OBJECTID объектов пути от корня до самого объекта (для
+      # поиска в границах и пересборки поддерева): заполняет построитель путей
       def paths
         @derived.concat([:full_adm_path, :full_mun_path].map { Column.new(name: _1, type: :text) })
         @derived.concat([:full_adm_path_tsv, :full_mun_path_tsv].map { Column.new(name: _1, type: :tsvector) })
+        @derived.concat([:adm_path_ids, :mun_path_ids].map { Column.new(name: _1, type: :"bigint[]") })
+      end
+
+      # Вычисляемая колонка: PostgreSQL считает её сам при COPY и UPDATE
+      def generated(name, type, expression)
+        @derived << Column.new(name:, type:, generated: expression)
       end
 
       # Строка иерархии; в блоке — коды: у административной свои, у муниципальной — ОКТМО
@@ -223,6 +240,8 @@ module Gar
         text :house_num, :add_num1, :add_num2
         integer :house_type, :add_type1, :add_type2, :oper_type_id
         paths
+        # Номер для сравнения: без пробелов, в нижнем регистре, ё → е («10 А» → «10а»)
+        generated :house_num_norm, :text, "translate(lower(regexp_replace(house_num, '\\s+', '', 'g')), 'ё', 'е')"
       end,
       params_table(:house_params, "HOUSES_PARAMS"),
       object_table(:steads, "STEADS", "STEAD") do
@@ -279,6 +298,9 @@ module Gar
     ].freeze
 
     TABLES = (DICTIONARIES + REGIONAL).to_h { [_1.name, _1] }.freeze
+    # Таблицы объектов (адресные объекты, дома, участки, помещения, машино-места): у них есть
+    # строки в иерархиях
+    OBJECT_TABLES = REGIONAL.select { _1.actual == ACTUAL_RECORD }.map(&:name).freeze
 
     def self.fetch(name)
       TABLES.fetch(name.to_sym) { raise ConfigurationError, "Неизвестная таблица ГАР: #{name}" }
