@@ -14,11 +14,7 @@ module Gar
   # если загружены все типы параметров.
   Meta =
     Data.define(:version_id, :version_date, :region_codes, :tables, :param_types, :keep_history, :prune_hierarchy,
-                :status, :imported_at, :paths_built_at, :gem_version) do
-      def ready? = status == "ready"
-
-      def loaded?(table) = tables.include?(table.to_sym)
-    end
+                :status, :imported_at, :paths_built_at, :gem_version)
 
   class Meta
     TABLE   = "gar_meta"
@@ -26,16 +22,20 @@ module Gar
       version_id: "integer NOT NULL", version_date: "date NOT NULL", region_codes: "text[] NOT NULL", tables: "text[] NOT NULL",
       param_types: "integer[]", keep_history: "text[] NOT NULL", prune_hierarchy: "boolean NOT NULL", status: "text NOT NULL",
       imported_at: "timestamptz", paths_built_at: "timestamptz", gem_version: "text NOT NULL"
-    }.freeze
-    ARRAY = PG::TextEncoder::Array.new
+    }.map { |name, type| Schema::Column.new(name:, type:) }.freeze
+    # Время каждой стадии: статус → колонка
+    STAMPS = { "imported" => :imported_at, "ready" => :paths_built_at }.freeze
+    ARRAY  = PG::TextEncoder::Array.new
 
     class << self
       # Сведения схемы; nil — схема без gar_meta (создана не импортом гема)
       def read(conn, schema)
-        return unless exists?(conn, schema)
+        return unless Database.relation_exists?(conn, qualified(schema))
 
-        row = conn.exec("SELECT row_to_json(m) FROM #{qualified(schema)} m").getvalue(0, 0)
-        from_json(JSON.parse(row))
+        row = JSON.parse(conn.exec("SELECT row_to_json(m) FROM #{qualified(schema)} m").getvalue(0, 0))
+        new(**row.transform_keys(&:to_sym),
+            version_date: Date.iso8601(row["version_date"]), tables: row["tables"].map(&:to_sym), keep_history: row["keep_history"].map(&:to_sym),
+            imported_at: time(row["imported_at"]), paths_built_at: time(row["paths_built_at"]))
       end
 
       # Создаёт таблицу со строкой импорта архива (Archive) в статусе importing; настройки
@@ -49,35 +49,22 @@ module Gar
           keep_history: ARRAY.encode(config.keep_history.map(&:to_s)), prune_hierarchy: config.prune_hierarchy,
           status: "importing", gem_version: VERSION
         }
-        conn.exec("CREATE TABLE #{qualified(schema)} (#{COLUMNS.map { |name, type| "#{Schema.quote(name)} #{type}" }.join(', ')})")
-        conn.exec_params("INSERT INTO #{qualified(schema)} (#{values.keys.join(', ')}) VALUES (#{placeholders(values.size)})", values.values)
+        conn.exec("CREATE TABLE #{qualified(schema)} (#{COLUMNS.map(&:definition).join(', ')})")
+        conn.exec_params("INSERT INTO #{qualified(schema)} (#{values.keys.join(', ')}) VALUES (#{(1..values.size).map { "$#{_1}" }.join(', ')})",
+                         values.values)
       end
 
-      # Переводит схему в статус status и отмечает время стадии (imported_at, paths_built_at);
-      # схему без gar_meta не трогает
-      def update(conn, schema, status:, stamp:)
-        return unless exists?(conn, schema)
+      # Переводит схему в статус imported или ready и отмечает время стадии; схему без gar_meta
+      # не трогает
+      def update(conn, schema, status)
+        return unless Database.relation_exists?(conn, qualified(schema))
 
-        conn.exec_params("UPDATE #{qualified(schema)} SET status = $1, #{Schema.quote(stamp)} = now()", [status])
+        conn.exec_params("UPDATE #{qualified(schema)} SET status = $1, #{Schema.quote(STAMPS.fetch(status))} = now()", [status])
       end
 
       private
 
-      def exists?(conn, schema)
-        conn.exec_params("SELECT to_regclass($1)", [qualified(schema)]).getvalue(0, 0)
-      end
-
-      def from_json(row)
-        new(
-          version_id: row["version_id"], version_date: Date.iso8601(row["version_date"]), region_codes: row["region_codes"].freeze,
-          tables: row["tables"].map(&:to_sym).freeze, param_types: row["param_types"]&.freeze,
-          keep_history: row["keep_history"].map(&:to_sym).freeze, prune_hierarchy: row["prune_hierarchy"], status: row["status"],
-          imported_at: row["imported_at"]&.then { Time.iso8601(_1) }, paths_built_at: row["paths_built_at"]&.then { Time.iso8601(_1) },
-          gem_version: row["gem_version"]
-        )
-      end
-
-      def placeholders(count) = (1..count).map { "$#{_1}" }.join(", ")
+      def time(value) = value && Time.iso8601(value)
 
       def qualified(schema) = "#{Schema.quote(schema)}.#{TABLE}"
     end

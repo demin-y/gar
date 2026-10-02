@@ -55,7 +55,7 @@ module Gar
         done    += pending[table]
         create_path_indexes(table, hierarchies)
       end
-      Meta.update(db_conn, schema, status: "ready", stamp: :paths_built_at)
+      Meta.update(db_conn, schema, "ready")
       updated
     end
 
@@ -63,19 +63,17 @@ module Gar
     # они есть, — чтобы build пересобрал их: после переименования, переноса в иерархии или
     # удаления объекта. Возвращает число очищенных записей
     def invalidate(object_ids)
+      return 0 if hierarchies.empty?
+
       ids   = PG::TextEncoder::Array.new.encode(object_ids.map { Integer(_1) })
-      all   = Configuration::HIERARCHY_TABLES.keys
-      reset = all.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
-      found = ["object_id = ANY($1::bigint[])", *all.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
+      reset = hierarchies.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
+      found = ["object_id = ANY($1::bigint[])", *hierarchies.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
+
       tables.sum { db_conn.exec_params("UPDATE #{qualified(_1)} SET #{reset} WHERE #{found}", [ids]).cmd_tuples }
     end
 
-    # Таблицы с путями; без адресных объектов пути не строятся — они собираются из них
-    def tables
-      return [] if hierarchies.empty? || !table_exists?(:address_objects)
-
-      Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
-    end
+    # Таблицы с путями
+    def tables = Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
 
     # Загруженные иерархии
     def hierarchies = @hierarchies ||= Configuration::HIERARCHY_TABLES.select { table_exists?(_2) }.keys
@@ -198,9 +196,7 @@ module Gar
       conn.exec("CREATE INDEX IF NOT EXISTS #{Schema.quote("idx_#{table}_#{column}")} ON #{qualified(table)} USING gin (#{column}) #{condition}")
     end
 
-    def table_exists?(name)
-      db_conn.exec_params("SELECT to_regclass($1)", [qualified(name)]).getvalue(0, 0)
-    end
+    def table_exists?(name) = Database.relation_exists?(db_conn, qualified(name))
 
     def qualified(name) = "#{Schema.quote(schema)}.#{Schema.quote(name)}"
   end

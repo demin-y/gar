@@ -36,10 +36,11 @@ module Gar
       warn_missing_regions(jobs, region_codes)
       create_schema(schema, tables, archive:, region_codes:)
       load_data(archive, jobs, schema, on_progress)
+      prune_hierarchies(schema, tables)
       loaded = jobs.group_by(&:table).transform_values { |table_jobs| table_jobs.sum(&:size) }
       build_indexes(schema, tables.sort_by { -loaded.fetch(_1, 0) })
       # Статус пишется последним: схема в статусе importing — незавершённый импорт
-      Meta.update(db_conn, schema, status: "imported", stamp: :imported_at)
+      Meta.update(db_conn, schema, "imported")
       logger.info "Импорт завершён: схема #{schema}"
       schema
     rescue PG::Error, SystemCallError, IOError => e
@@ -130,56 +131,74 @@ module Gar
 
     # Отбор записей при разборе: только актуальные (без keep_history) и нужные типы параметров.
     # Действующий параметр не закрыт изменением (CHANGEIDEND = 0) и не истёк к дате выгрузки
+    # Фильтры проверяются по порядку: дешёвый отбор по типу — первым
     def filters_for(table, version_date)
       config  = Gar.configuration
-      filters = table.actual && !config.keep_history?(table.name) ? table.actual.dup : {}
-      if table.params?
-        cutoff = version_date.iso8601
-        filters["ENDDATE"] = ->(end_date) { end_date.nil? || end_date > cutoff } unless filters.empty?
-        filters["TYPEID"]  = Set.new(config.param_types.map(&:to_s)) if config.param_types != :all
-      end
+      filters = {}
+      filters["TYPEID"] = Set.new(config.param_types.map(&:to_s)) if table.params? && config.param_types != :all
+      return filters if table.actual.nil? || config.keep_history?(table.name)
+
+      filters.merge!(table.actual)
+      cutoff = version_date.iso8601
+      filters["ENDDATE"] = ->(end_date) { end_date.nil? || end_date > cutoff } if table.params?
       filters
     end
 
-    # Ключи и индексы после загрузки: так COPY не тратит время на их поддержку. Таблицы
-    # независимы, при parallel_import они обрабатываются параллельно, крупные первыми; работа
-    # идёт на сервере, поэтому хватает потоков. Память сервера — до maintenance_work_mem на
-    # каждый воркер; задаётся, только если указан import_maintenance_work_mem.
+    # Ключи и индексы после загрузки: так COPY не тратит время на их поддержку. Крупные
+    # таблицы первыми
     def build_indexes(schema, tables)
-      objects = tables.map(&:name) & Schema::OBJECT_TABLES
-      if Gar.configuration.parallel_import && tables.size > 1
-        Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers) do |table|
-          with_worker_connection { |conn| build_table_indexes(conn, schema, table, objects) }
-        end
-      else
-        tables.each { |table| build_table_indexes(db_conn, schema, table, objects) }
-      end
-    end
-
-    def build_table_indexes(conn, schema, table, objects)
-      memory = Gar.configuration.import_maintenance_work_mem
-      conn.transaction do
-        prune_hierarchy(conn, schema, table, objects) if Gar.configuration.prune_hierarchy
+      each_on_server(tables) do |conn, table|
         logger.info "  Ключи, индексы и статистика: #{table.name}"
-        conn.exec("SET LOCAL maintenance_work_mem TO #{conn.escape_literal(memory)}") if memory
-        table.index_sqls(schema).each { conn.exec(_1) }
-        conn.exec("ANALYZE #{table.qualified_name(schema)}")
+        conn.transaction do
+          set_work_memory(conn, "maintenance_work_mem")
+          table.index_sqls(schema).each { conn.exec(_1) }
+          conn.exec("ANALYZE #{table.qualified_name(schema)}")
+        end
       end
     end
 
-    # Оставляет в иерархии строки только загруженных объектов (objects — таблицы объектов):
-    # строки участков, помещений и машино-мест без их таблиц не нужны ни путям, ни поиску.
-    # Копия с отбором вместо DELETE: таблица ещё без индексов, а копия не оставляет мёртвых строк
-    def prune_hierarchy(conn, schema, table, objects)
-      return unless Configuration::HIERARCHY_TABLES.value?(table.name) && objects.any?
+    # Оставляет в иерархиях строки только загруженных объектов: строки участков, помещений и
+    # машино-мест без их таблиц не нужны ни путям, ни поиску. Копия с отбором вместо DELETE:
+    # таблица ещё без индексов, а копия не оставляет мёртвых строк. Отдельный шаг до индексов:
+    # копия читает таблицы объектов, и её блокировки не должны задерживать их ключи
+    def prune_hierarchies(schema, tables)
+      objects     = tables.map(&:name) & Schema::OBJECT_TABLES
+      hierarchies = tables.select { Configuration::HIERARCHY_TABLES.value?(_1.name) }
+      return if !Gar.configuration.prune_hierarchy || objects.empty?
 
+      loaded = objects.map { "SELECT object_id FROM #{Schema.fetch(_1).qualified_name(schema)}" }.join(" UNION ALL ")
+      each_on_server(hierarchies) { |conn, table| prune_hierarchy(conn, schema, table, loaded) }
+    end
+
+    def prune_hierarchy(conn, schema, table, loaded)
       name   = table.qualified_name(schema)
       pruned = "#{quote(schema)}.#{quote("#{table.name}_pruned")}"
-      loaded = objects.map { "SELECT object_id FROM #{Schema.fetch(_1).qualified_name(schema)}" }.join(" UNION ALL ")
-      kept   = conn.exec("CREATE TABLE #{pruned} AS SELECT * FROM #{name} WHERE object_id IN (#{loaded})").cmd_tuples
-      conn.exec("DROP TABLE #{name}")
-      conn.exec("ALTER TABLE #{pruned} RENAME TO #{quote(table.name)}")
-      logger.info "  Иерархия #{table.name}: #{kept} строк загруженных объектов"
+      conn.transaction do
+        set_work_memory(conn, "work_mem") # хеш OBJECTID загруженных объектов
+        kept = conn.exec("CREATE TABLE #{pruned} AS SELECT * FROM #{name} WHERE object_id IN (#{loaded})").cmd_tuples
+        conn.exec("DROP TABLE #{name}")
+        conn.exec("ALTER TABLE #{pruned} RENAME TO #{quote(table.name)}")
+        logger.info "  Иерархия #{table.name}: #{kept} строк загруженных объектов"
+      end
+    end
+
+    # Работа на сервере по таблицам (ключи, индексы, отбор иерархий): таблицы независимы, при
+    # parallel_import обрабатываются параллельно в потоках — каждый со своим соединением
+    def each_on_server(tables)
+      if Gar.configuration.parallel_import && tables.size > 1
+        Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers) do |table|
+          with_worker_connection { |conn| yield conn, table }
+        end
+      else
+        tables.each { |table| yield db_conn, table }
+      end
+    end
+
+    # Память сервера на операцию — import_maintenance_work_mem на каждый воркер; без настройки
+    # действует значение сервера
+    def set_work_memory(conn, setting)
+      memory = Gar.configuration.import_maintenance_work_mem
+      conn.exec("SET LOCAL #{setting} TO #{conn.escape_literal(memory)}") if memory
     end
 
     def parallel_options
@@ -196,7 +215,7 @@ module Gar
     end
 
     def warn_missing_regions(jobs, region_codes)
-      missing = Array(region_codes).map(&:to_s) - jobs.filter_map(&:region_code)
+      missing = region_codes - jobs.filter_map(&:region_code)
       logger.warn "В архиве нет папок субъектов: #{missing.join(', ')}" if missing.any?
     end
 

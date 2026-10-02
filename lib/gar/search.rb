@@ -164,9 +164,10 @@ module Gar
     end
 
     def require_hierarchy(path_type)
-      name   = table(Configuration::HIERARCHY_TABLES.fetch(path_type))
-      exists = Database.with_connection(db_conn) { _1.exec_params("SELECT to_regclass($1)", [name]).getvalue(0, 0) }
-      raise ConfigurationError, "Иерархия #{path_type} не загружена: в схеме #{schema} нет таблицы #{name}" unless exists
+      name = table(Configuration::HIERARCHY_TABLES.fetch(path_type))
+      return if Database.with_connection(db_conn) { Database.relation_exists?(_1, name) }
+
+      raise ConfigurationError, "Иерархия #{path_type} не загружена: в схеме #{schema} нет таблицы #{name}"
     end
 
     # Действующие строки иерархии (алиас as) — прямые потомки действующего объекта с GUID $1

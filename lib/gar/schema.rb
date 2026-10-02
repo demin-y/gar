@@ -14,16 +14,11 @@ module Gar
 
     def self.quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
 
-    # generated — выражение вычисляемой колонки (GENERATED ALWAYS AS … STORED)
+    # type — тип SQL; у производной колонки может быть с условием (GENERATED ALWAYS AS …)
     Column =
-      Data.define(:name, :type, :generated) do
-        def initialize(name:, type:, generated: nil) = super
-
+      Data.define(:name, :type) do
         def attribute = name.to_s.delete("_").upcase
-
-        def definition
-          "#{Schema.quote(name)} #{type}#{" GENERATED ALWAYS AS (#{generated}) STORED" if generated}"
-        end
+        def definition = "#{Schema.quote(name)} #{type}"
       end
 
     Index = Data.define(:name, :definition)
@@ -130,7 +125,7 @@ module Gar
 
       # Вычисляемая колонка: PostgreSQL считает её сам при COPY и UPDATE
       def generated(name, type, expression)
-        @derived << Column.new(name:, type:, generated: expression)
+        @derived << Column.new(name:, type: "#{type} GENERATED ALWAYS AS (#{expression}) STORED")
       end
 
       # Строка иерархии; в блоке — коды: у административной свои, у муниципальной — ОКТМО

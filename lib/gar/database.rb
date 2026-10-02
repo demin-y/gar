@@ -50,6 +50,11 @@ module Gar
         translate_errors { conn ? yield(conn) : with_pooled(&) }
       end
 
+      # Есть ли таблица или индекс (qualified_name — уже в кавычках); хватает права SELECT
+      def relation_exists?(conn, qualified_name)
+        !conn.exec_params("SELECT to_regclass($1)", [qualified_name]).getvalue(0, 0).nil?
+      end
+
       # Закрывает соединения пула; следующий with_connection создаст новый
       def disconnect!
         old = @mutex.synchronize { @pool.tap { @pool = nil } }

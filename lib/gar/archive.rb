@@ -141,7 +141,7 @@ module Gar
     # в конце один большой файл.
     def jobs(tables, region_codes: nil)
       by_file = tables.to_h { [_1.file, _1] }
-      codes   = Array(region_codes).map(&:to_s)
+      codes   = Configuration.region_codes(region_codes)
       jobs    = entries.each_value.filter_map { |entry| job_for(entry, by_file, codes) }
       jobs.sort_by { -_1.size }
     end
