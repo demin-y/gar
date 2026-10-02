@@ -7,6 +7,7 @@
 ```bash
 python3 examples/tools/gar_toc.py downloads/full_base/gar_xml_v20260116.zip 43 11
 python3 examples/tools/gar_toc.py '<GarXMLDeltaURL>' 43 11 --insecure   # дельта-архив
+python3 examples/tools/gar_delta_probe.py --insecure   # последние дельты из API: оглавление и примеры записей
 ```
 
 Дельта-архив ещё не снят (из облачного окружения fias.nalog.ru недоступен). `Gar::Delta` (этап 9)
