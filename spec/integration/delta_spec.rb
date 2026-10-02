@@ -126,6 +126,20 @@ RSpec.describe "Дельты", :db do
       expect(house_count(4_300_003)).to eq(city) # по муниципальной иерархии дом остался в городе
     end
 
+    it "перенос улицы без строк её домов в дельте переписывает PATH потомков (как в реальных дельтах ФНС)" do
+      zip =
+        delta do |d|
+          d.region("43", :adm_hierarchy, item(4_300_011, "4300001.4300003.4300011", { "ISACTIVE" => "0" }),
+                   item(4_300_011, "4300001.4300020.4300011", { "ID" => 9_500_011 }))
+        end
+
+      apply(zip)
+
+      expect(value("SELECT path FROM #{current}.adm_hierarchy WHERE object_id = 4300201 AND is_active")).to eq("4300001.4300020.4300011.4300201")
+      expect(house_path(4_300_201)).to eq("Кировская обл, Кировский п, Воровского ул, д. 5")
+      expect(house_path(4_300_201, :mun)).to eq("Кировская обл, город Киров г.о., Киров г, Воровского ул, д. 5")
+    end
+
     it "пропускает записи чужих субъектов и не применяет дельту повторно" do
       zip =
         delta do |d|

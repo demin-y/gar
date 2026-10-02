@@ -114,6 +114,7 @@ module Gar
       key     = table.primary_key.map { quote(_1) }
       keep    = keep_condition(table, meta, archive)
       updates = (table.copy_columns.map(&:name) - table.primary_key).map { "#{quote(_1)} = EXCLUDED.#{quote(_1)}" }
+      track_moves(table, keep) if hierarchy?(table)
       deleted = db_conn.exec("DELETE FROM #{target} t USING #{staging(table)} s " \
                              "WHERE #{key.map { "t.#{_1} = s.#{_1}" }.join(' AND ')} AND (#{keep}) IS NOT TRUE").cmd_tuples
       upserted = db_conn.exec(<<~SQL).cmd_tuples
@@ -121,9 +122,41 @@ module Gar
         SELECT DISTINCT ON (#{key.join(', ')}) #{columns(table)} FROM #{staging(table)} s WHERE #{keep} ORDER BY #{key.join(', ')}
         ON CONFLICT (#{key.join(', ')}) DO #{updates.empty? ? 'NOTHING' : "UPDATE SET #{updates.join(', ')}"}
       SQL
+      upserted += move_descendants(table) if hierarchy?(table)
       logger.debug "  #{table.name}: #{upserted} добавлено или изменено, #{deleted} удалено"
       { upserted:, deleted: }
     end
+
+    # Перенос в иерархии: ФНС присылает новую строку самого объекта (новый PARENTOBJID и PATH),
+    # а строки его потомков — не обязательно, и их PATH остаётся со старой цепочкой. До слияния
+    # запоминаем старый и новый PATH перенесённых объектов (moves)...
+    def track_moves(table, keep)
+      db_conn.exec(<<~SQL)
+        CREATE TEMP TABLE #{moves(table)} ON COMMIT DROP AS
+        SELECT DISTINCT ON (s.object_id) s.object_id, t.path AS old_path, s.path AS new_path
+        FROM #{staging(table)} s JOIN #{table.qualified_name(schema)} t ON t.object_id = s.object_id AND t.is_active
+        WHERE #{keep} AND t.path <> s.path
+        ORDER BY s.object_id, s.id DESC
+      SQL
+    end
+
+    # ...после — меняем начало PATH у строк потомков, где оно ещё старое (присланные дельтой
+    # строки потомков уже с новым PATH и не меняются). Потомки — по parent_obj_id (индекс)
+    def move_descendants(table)
+      target = table.qualified_name(schema)
+      db_conn.exec(<<~SQL).cmd_tuples
+        WITH RECURSIVE d AS (
+          SELECT m.object_id AS root, h.id, h.object_id FROM #{moves(table)} m JOIN #{target} h ON h.parent_obj_id = m.object_id
+          UNION
+          SELECT d.root, h.id, h.object_id FROM d JOIN #{target} h ON h.parent_obj_id = d.object_id
+        )
+        UPDATE #{target} h SET path = m.new_path || substr(h.path, length(m.old_path) + 1)
+        FROM d JOIN #{moves(table)} m ON m.object_id = d.root
+        WHERE h.id = d.id AND starts_with(h.path, m.old_path || '.')
+      SQL
+    end
+
+    def moves(table) = "pg_temp.gar_moves_#{table.name}"
 
     # Фильтры записи s — как при импорте схемы (Importer#filters_for), но по настройкам из
     # gar_meta; плюс prune_hierarchy: строка иерархии — только у загруженного объекта
