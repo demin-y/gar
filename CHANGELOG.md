@@ -13,8 +13,9 @@
   `Gar::Entities`, `Gar::XmlParser`, `Gar::Xml::*`.
 - Настройки `import_entities`, `entity_options` и `batch_size` удалены. Состав данных задают
   `config.preset` (`:minimal` по умолчанию, `:extended`, `:full`), `config.tables`,
-  `config.hierarchies`, `config.param_types`, `config.keep_history`. Справочники корня
-  архива грузятся всегда.
+  `config.hierarchies`, `config.param_types`, `config.keep_history` (список таблиц; `true` —
+  все, где есть неактуальные записи). Справочники корня архива грузятся всегда.
+- `parallel_import_workers` по умолчанию — число ядер, но не больше 4.
 - По умолчанию загружаются только актуальные записи (`ISACTUAL=1`, действующие строки
   иерархий и параметров); `reestr_objects` в набор по умолчанию не входит.
 - Таблица `params` заменена таблицами по файлам ФНС: `addr_obj_params`, `house_params`
@@ -35,10 +36,15 @@
 **Новое**
 - `import_full_base(zip, schema:, region_codes:, on_progress:)`: своя целевая схема, только
   папки выбранных субъектов, колбэк прогресса `->(done, total, stage)` в байтах XML.
-- XML читается потоком прямо из zip — распаковка на диск не нужна.
+- XML читается потоком прямо из zip — распаковка на диск не нужна. Память воркера постоянна
+  (~45 МБ вместе с Ruby) при любом размере файла; целостность файла проверяется по CRC32.
 - Одна очередь файлов «таблица × субъект» для всех таблиц, крупные первыми; первичные ключи
-  и индексы строятся после загрузки, затем `ANALYZE`. Индексы на `object_guid`.
-- `config.import_maintenance_work_mem` (по умолчанию `256MB`) для построения индексов.
+  и индексы строятся после загрузки, по таблицам параллельно, затем `ANALYZE`. Индексы на
+  `object_guid`.
+- `config.import_maintenance_work_mem` — память PostgreSQL на построение индексов (по
+  умолчанию не задаётся: действует настройка сервера).
+- Гибель воркера (например, от нехватки памяти) — `Gar::ImportError` с подсказкой.
+- `FullPathBuilder` пропускает незагруженную иерархию (`config.hierarchies = [:adm]`).
 - `Gar.reset_configuration!`.
 
 **Исправлено**

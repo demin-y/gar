@@ -10,29 +10,30 @@ module Gar
   # заполняет кодом субъекта из имени папки архива, производные колонки (пути) — построитель
   # путей; в XML их нет. Состав атрибутов сверяет спека с XSD из docs/xml_schema.
   module Schema
-    SQL_TYPES = {
-      bigint: "bigint", integer: "integer", text: "text", date: "date", boolean: "boolean", uuid: "uuid",
-      tsvector: "tsvector"
-    }.freeze
+    SQL_TYPES = [:bigint, :integer, :text, :date, :boolean, :uuid, :tsvector].freeze
+
+    def self.quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
 
     Column =
-      Data.define(:name, :type, :attribute) do
-        def definition = "#{PG::Connection.quote_ident(name.to_s)} #{SQL_TYPES.fetch(type)}"
+      Data.define(:name, :type) do
+        def attribute = name.to_s.delete("_").upcase
+        def definition = "#{Schema.quote(name)} #{type}"
       end
 
     Index = Data.define(:name, :definition)
 
-    REGION_CODE = Column.new(name: :region_code, type: :text, attribute: nil)
+    REGION_CODE = Column.new(name: :region_code, type: :text)
 
     # file    — ключ в имени файла архива: AS_<file>_<дата>_<guid>.XML;
     # element — элемент XML с одной записью;
+    # columns — колонки из атрибутов XML; derived — колонки, которые заполняет построитель путей;
     # actual  — условие актуальной записи (атрибут → значение); без keep_history остальные
     #           записи при разборе отбрасываются;
     # ignored — атрибуты XML, которые не храним (с пояснением в описании таблицы)
     Table =
       Data.define(:name, :file, :element, :regional, :region_code, :columns, :derived,
                   :primary_key, :indexes, :actual, :ignored) do
-        def qualified_name(schema) = "#{quote(schema)}.#{quote(name)}"
+        def qualified_name(schema) = "#{Schema.quote(schema)}.#{Schema.quote(name)}"
 
         # Колонки, которые заполняет COPY, — в порядке значений строки XmlReader
         def copy_columns = region_code ? [*columns, REGION_CODE] : columns
@@ -40,29 +41,22 @@ module Gar
         def params? = element == "PARAM"
 
         def create_sql(schema)
-          definitions = [*copy_columns, *derived].map(&:definition)
-          "CREATE TABLE #{qualified_name(schema)} (#{definitions.join(', ')})"
+          "CREATE TABLE #{qualified_name(schema)} (#{[*copy_columns, *derived].map(&:definition).join(', ')})"
         end
 
         def copy_sql(schema)
-          "COPY #{qualified_name(schema)} (#{copy_columns.map { quote(_1.name) }.join(', ')}) FROM STDIN"
+          "COPY #{qualified_name(schema)} (#{copy_columns.map { Schema.quote(_1.name) }.join(', ')}) FROM STDIN"
         end
 
-        def primary_key_sql(schema)
-          return if primary_key.empty?
-
-          "ALTER TABLE #{qualified_name(schema)} ADD PRIMARY KEY (#{primary_key.map { quote(_1) }.join(', ')})"
-        end
-
+        # Первичный ключ и индексы: строятся после загрузки, чтобы COPY их не поддерживал
         def index_sqls(schema)
-          indexes.map do |index|
-            "CREATE INDEX #{quote("idx_#{name}_#{index.name}")} ON #{qualified_name(schema)} #{index.definition}"
-          end
+          key = "ALTER TABLE #{qualified_name(schema)} ADD PRIMARY KEY (#{primary_key.map { Schema.quote(_1) }.join(', ')})"
+          indexes =
+            self.indexes.map do |index|
+              "CREATE INDEX #{Schema.quote("idx_#{name}_#{index.name}")} ON #{qualified_name(schema)} #{index.definition}"
+            end
+          primary_key.empty? ? indexes : [key, *indexes]
         end
-
-        private
-
-        def quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
       end
 
     # Набор колонок таблицы в блоке Schema.table
@@ -76,15 +70,8 @@ module Gar
         @indexes     = []
       end
 
-      SQL_TYPES.each_key do |type|
-        define_method(type) do |*names|
-          names.each { |name| @columns << Column.new(name:, type:, attribute: name.to_s.delete("_").upcase) }
-        end
-      end
-
-      # Колонки, которых нет в XML: их заполняет построитель путей
-      def derived_columns(type, *names)
-        names.each { |name| @derived << Column.new(name:, type:, attribute: nil) }
+      SQL_TYPES.each do |type|
+        define_method(type) { |*names| @columns.concat(names.map { Column.new(name: _1, type:) }) }
       end
 
       def key(*names)
@@ -92,7 +79,7 @@ module Gar
       end
 
       # По умолчанию — B-tree по одноимённой колонке
-      def index(name, definition = "(#{PG::Connection.quote_ident(name.to_s)})")
+      def index(name, definition = "(#{Schema.quote(name)})")
         @indexes << Index.new(name:, definition:)
       end
 
@@ -102,31 +89,34 @@ module Gar
         boolean :is_active
       end
 
-      # Начало записи объекта: идентификаторы записи, объекта и изменения
-      def object_identity
+      # Справочник типов: полное и краткое наименование, описание
+      def type_dictionary
+        integer :id
+        text :name, :short_name, :desc
+        dictionary_validity
+      end
+
+      # Запись объекта (адресный объект, дом, участок, помещение): свои колонки — в блоке,
+      # между общими идентификаторами и признаками актуальности (ISACTUAL/ISACTIVE — 1/0)
+      def object_record(&)
         bigint :id, :object_id
         uuid :object_guid
         bigint :change_id
-      end
-
-      # Конец записи объекта: связи версий, даты, признаки актуальности и активности (1/0)
-      def object_history
+        instance_eval(&)
         bigint :prev_id, :next_id
         date :update_date, :start_date, :end_date
         boolean :is_actual, :is_active
-      end
-
-      def object_indexes
         index :object_id
         index :object_guid
       end
 
+      # Полные пути и их tsvector: заполняет построитель путей
       def paths
-        derived_columns :text, :full_adm_path, :full_mun_path
-        derived_columns :tsvector, :full_adm_path_tsv, :full_mun_path_tsv
+        @derived.concat([:full_adm_path, :full_mun_path].map { Column.new(name: _1, type: :text) })
+        @derived.concat([:full_adm_path_tsv, :full_mun_path_tsv].map { Column.new(name: _1, type: :tsvector) })
       end
 
-      # Строка иерархии без кодов: у административной они свои, у муниципальной — ОКТМО
+      # Строка иерархии; в блоке — коды: у административной свои, у муниципальной — ОКТМО
       def hierarchy_item
         bigint :id, :object_id, :parent_obj_id, :change_id
         yield
@@ -154,63 +144,53 @@ module Gar
 
     TABLE_DEFAULTS = { regional: true, region_code: false, actual: nil, ignored: [].freeze }.freeze
 
-    # Именованные параметры — regional:, region_code:, actual:, ignored: (см. Table)
-    def self.table(name, file, element, **, &)
-      builder = Builder.new
-      builder.instance_eval(&)
-      Table.new(name:, file:, element:, **TABLE_DEFAULTS, **,
-                columns: builder.columns.freeze, derived: builder.derived.freeze,
-                primary_key: builder.primary_key.freeze, indexes: builder.indexes.freeze)
+    class << self
+      # Именованные параметры — regional:, region_code:, actual:, ignored: (см. Table)
+      def table(name, file, element, **, &)
+        builder = Builder.new
+        builder.instance_eval(&)
+        Table.new(name:, file:, element:, **TABLE_DEFAULTS, **,
+                  columns: builder.columns.freeze, derived: builder.derived.freeze,
+                  primary_key: builder.primary_key.freeze, indexes: builder.indexes.freeze)
+      end
+
+      def dictionary(name, file, element, &) = table(name, file, element, regional: false, &)
+
+      def object_table(name, file, element, &columns)
+        table(name, file, element, region_code: true, actual: ACTUAL_RECORD) { object_record(&columns) }
+      end
+
+      def params_table(name, file) = table(name, file, "PARAM", actual: CURRENT_PARAM) { param }
     end
 
     # Справочники корня архива
     DICTIONARIES = [
-      table(:object_levels, "OBJECT_LEVELS", "OBJECTLEVEL", regional: false) do
+      dictionary(:object_levels, "OBJECT_LEVELS", "OBJECTLEVEL") do
         integer :level
         text :name, :short_name
         dictionary_validity
         key :level
       end,
-      table(:address_object_types, "ADDR_OBJ_TYPES", "ADDRESSOBJECTTYPE", regional: false) do
+      dictionary(:address_object_types, "ADDR_OBJ_TYPES", "ADDRESSOBJECTTYPE") do
         integer :id, :level
         text :short_name, :name, :desc
         dictionary_validity
       end,
-      table(:house_types, "HOUSE_TYPES", "HOUSETYPE", regional: false) do
-        integer :id
-        text :name, :short_name, :desc
-        dictionary_validity
-      end,
-      table(:add_house_types, "ADDHOUSE_TYPES", "HOUSETYPE", regional: false) do
-        integer :id
-        text :name, :short_name, :desc
-        dictionary_validity
-      end,
-      table(:apartment_types, "APARTMENT_TYPES", "APARTMENTTYPE", regional: false) do
-        integer :id
-        text :name, :short_name, :desc
-        dictionary_validity
-      end,
-      table(:room_types, "ROOM_TYPES", "ROOMTYPE", regional: false) do
-        integer :id
-        text :name, :short_name, :desc
-        dictionary_validity
-      end,
-      table(:operation_types, "OPERATION_TYPES", "OPERATIONTYPE", regional: false) do
-        integer :id
-        text :name, :short_name, :desc
-        dictionary_validity
-      end,
-      table(:param_types, "PARAM_TYPES", "PARAMTYPE", regional: false) do
+      dictionary(:house_types, "HOUSE_TYPES", "HOUSETYPE") { type_dictionary },
+      dictionary(:add_house_types, "ADDHOUSE_TYPES", "HOUSETYPE") { type_dictionary },
+      dictionary(:apartment_types, "APARTMENT_TYPES", "APARTMENTTYPE") { type_dictionary },
+      dictionary(:room_types, "ROOM_TYPES", "ROOMTYPE") { type_dictionary },
+      dictionary(:operation_types, "OPERATION_TYPES", "OPERATIONTYPE") { type_dictionary },
+      dictionary(:param_types, "PARAM_TYPES", "PARAMTYPE") do
         integer :id
         text :name, :code, :desc
         dictionary_validity
       end,
-      table(:normative_docs_kinds, "NORMATIVE_DOCS_KINDS", "NDOCKIND", regional: false) do
+      dictionary(:normative_docs_kinds, "NORMATIVE_DOCS_KINDS", "NDOCKIND") do
         integer :id
         text :name
       end,
-      table(:normative_docs_types, "NORMATIVE_DOCS_TYPES", "NDOCTYPE", regional: false) do
+      dictionary(:normative_docs_types, "NORMATIVE_DOCS_TYPES", "NDOCTYPE") do
         integer :id
         text :name
         date :start_date, :end_date
@@ -219,13 +199,10 @@ module Gar
 
     # Таблицы субъекта: по одному файлу в каждой папке NN/
     REGIONAL = [
-      table(:address_objects, "ADDR_OBJ", "OBJECT", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      object_table(:address_objects, "ADDR_OBJ", "OBJECT") do
         text :name, :type_name
         integer :level, :oper_type_id
-        object_history
         paths
-        object_indexes
         index :level
         index :fulltext, "USING gin (to_tsvector('russian', name || ' ' || type_name)) WHERE is_active = true"
       end,
@@ -234,7 +211,7 @@ module Gar
         index :parent_id
         index :child_id
       end,
-      table(:addr_obj_params, "ADDR_OBJ_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
+      params_table(:addr_obj_params, "ADDR_OBJ_PARAMS"),
       # Код субъекта берётся из имени папки (region_code), REGIONCODE из XML не храним
       table(:adm_hierarchy, "ADM_HIERARCHY", "ITEM", region_code: true, actual: ACTIVE_ITEM, ignored: ["REGIONCODE"]) do
         hierarchy_item { text :area_code, :city_code, :place_code, :plan_code, :street_code }
@@ -242,47 +219,32 @@ module Gar
       table(:mun_hierarchy, "MUN_HIERARCHY", "ITEM", region_code: true, actual: ACTIVE_ITEM) do
         hierarchy_item { text :oktmo }
       end,
-      table(:houses, "HOUSES", "HOUSE", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      object_table(:houses, "HOUSES", "HOUSE") do
         text :house_num, :add_num1, :add_num2
         integer :house_type, :add_type1, :add_type2, :oper_type_id
-        object_history
         paths
-        object_indexes
       end,
-      table(:house_params, "HOUSES_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
-      table(:steads, "STEADS", "STEAD", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      params_table(:house_params, "HOUSES_PARAMS"),
+      object_table(:steads, "STEADS", "STEAD") do
         text :number
         integer :oper_type_id
-        object_history
-        object_indexes
       end,
-      table(:stead_params, "STEADS_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
-      table(:apartments, "APARTMENTS", "APARTMENT", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      params_table(:stead_params, "STEADS_PARAMS"),
+      object_table(:apartments, "APARTMENTS", "APARTMENT") do
         text :number
         integer :apart_type, :oper_type_id
-        object_history
-        object_indexes
       end,
-      table(:apartment_params, "APARTMENTS_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
-      table(:rooms, "ROOMS", "ROOM", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      params_table(:apartment_params, "APARTMENTS_PARAMS"),
+      object_table(:rooms, "ROOMS", "ROOM") do
         text :number
         integer :room_type, :oper_type_id
-        object_history
-        object_indexes
       end,
-      table(:room_params, "ROOMS_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
-      table(:carplaces, "CARPLACES", "CARPLACE", region_code: true, actual: ACTUAL_RECORD) do
-        object_identity
+      params_table(:room_params, "ROOMS_PARAMS"),
+      object_table(:carplaces, "CARPLACES", "CARPLACE") do
         text :number
         integer :oper_type_id
-        object_history
-        object_indexes
       end,
-      table(:carplace_params, "CARPLACES_PARAMS", "PARAM", actual: CURRENT_PARAM) { param },
+      params_table(:carplace_params, "CARPLACES_PARAMS"),
       table(:reestr_objects, "REESTR_OBJECTS", "OBJECT") do
         bigint :object_id
         uuid :object_guid

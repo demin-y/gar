@@ -79,6 +79,23 @@ module Gar
         false
       end
 
+      # Дочерний процесс наследует соединения родителя. Их нельзя ни использовать, ни закрывать:
+      # PQfinish (в том числе из финализатора при выходе процесса) пошлёт серверу Terminate по
+      # общему сокету и оборвёт соединение родителя. Поэтому в дочернем процессе сокеты всех
+      # унаследованных соединений перенаправляются в /dev/null (как discard! в Active Record) —
+      # один раз на процесс. В процессе parent_pid ничего не делает.
+      # TODO(этап 3): хук Process._fork в пуле соединений вместо явного вызова
+      def discard_inherited_connections(parent_pid)
+        return if [parent_pid, @discarded_in].include?(Process.pid)
+
+        @discarded_in = Process.pid
+        ObjectSpace.each_object(PG::Connection) do |conn|
+          conn.socket_io.reopen(IO::NULL) unless conn.finished?
+        rescue PG::Error, IOError, SystemCallError
+          nil
+        end
+      end
+
       def disconnect!
         @mutex.synchronize do
           @connection&.close unless @connection&.finished?

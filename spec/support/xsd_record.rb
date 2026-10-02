@@ -18,30 +18,19 @@ module XsdRecord
   end
 
   def read(table)
-    top        = children(Ox.load_file(path(table), mode: :generic).root, "xs:element")
-    item       = children(find(top.first, "xs:sequence"), "xs:element").first
+    top        = Ox.load_file(path(table), mode: :generic).root.locate("xs:element")
+    item       = top.first.locate("*/xs:sequence/xs:element").first
     definition = item[:ref] ? top.find { _1[:name] == item[:ref] } : item
-    attributes = children(find(definition, "xs:complexType"), "xs:attribute").to_h { [_1[:name], type_of(_1)] }
+    attributes = definition.locate("xs:complexType/xs:attribute").to_h { [_1[:name], type_of(_1)] }
     [item[:name] || item[:ref], attributes]
   end
 
   def type_of(attribute)
-    restriction = find(attribute, "xs:restriction")
-    facets      = (restriction&.nodes || []).group_by { _1.name.delete_prefix("xs:") }.transform_values { |nodes| nodes.map { _1[:value] } }
+    restriction = attribute.locate("xs:simpleType/xs:restriction").first
+    facets      =
+      (restriction&.nodes || []).grep(Ox::Element).group_by { _1.name.delete_prefix("xs:") }
+                                .transform_values { |nodes| nodes.map { _1[:value] } }
     { base: attribute[:type] || restriction&.[](:base), facets: }
-  end
-
-  def children(node, name) = node.nodes.select { _1.is_a?(Ox::Element) && _1.name == name }
-
-  def find(node, name)
-    node.nodes.each do |child|
-      next unless child.is_a?(Ox::Element)
-      return child if child.name == name
-
-      found = find(child, name)
-      return found if found
-    end
-    nil
   end
 
   # Совместим ли тип колонки с типом атрибута XSD

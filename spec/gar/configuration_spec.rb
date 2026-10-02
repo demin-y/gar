@@ -10,7 +10,8 @@ RSpec.describe Gar::Configuration do
 
     it "по умолчанию — минимальный набор: справочники, шесть таблиц субъекта, только актуальные записи" do
       expect(config).to have_attributes(preset: :minimal, hierarchies: [:adm, :mun], param_types: [5, 6, 7, 16, 22, 23],
-                                        keep_history: false)
+                                        keep_history: [], parallel_import_workers: [Etc.nprocessors, 4].min,
+                                        import_maintenance_work_mem: nil)
       expect(import_table_names).to eq(dictionaries + described_class::MINIMAL_TABLES)
     end
 
@@ -51,12 +52,23 @@ RSpec.describe Gar::Configuration do
       expect(config.keep_history?(:address_objects)).to be(false)
     end
 
+    it "keep_history = true хранит историю всех таблиц, где она есть; nil возвращает значение набора" do
+      config.keep_history = true
+      expect(config.keep_history).to include(:address_objects, :houses, :adm_hierarchy, :house_params).and exclude(:reestr_objects)
+
+      config.preset       = :extended
+      config.keep_history = nil
+      expect(config.keep_history).to eq([:address_objects])
+    end
+
     it "отвергает неизвестные значения ошибкой конфигурации" do
       expect { config.preset = :tiny }.to raise_error(Gar::ConfigurationError, /набор данных: :tiny/)
       expect { config.tables = [:houses, :params] }.to raise_error(Gar::ConfigurationError, /params/)
       expect { config.tables = [:house_types] }.to raise_error(Gar::ConfigurationError, /справочники грузятся всегда/)
       expect { config.hierarchies = [:adm, :geo] }.to raise_error(Gar::ConfigurationError, /geo/)
       expect { config.hierarchies = [] }.to raise_error(Gar::ConfigurationError, /хотя бы одна/)
+      expect { config.keep_history = [:reestr_objects] }.to raise_error(Gar::ConfigurationError, /reestr_objects/)
+      expect { config.param_types = ["индекс"] }.to raise_error(Gar::ConfigurationError, /индекс/)
     end
   end
 

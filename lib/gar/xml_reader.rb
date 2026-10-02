@@ -8,9 +8,10 @@ module Gar
   # Берёт только атрибуты колонок таблицы в порядке Schema::Table#copy_columns; отсутствующий
   # или пустой атрибут — NULL. Значения ФНС уже годятся для COPY как есть (даты YYYY-MM-DD,
   # 0/1 и true/false для boolean), поэтому строки собираются без преобразования типов.
-  # Записи, не прошедшие фильтры (атрибут → допустимые значения), отбрасываются.
+  # Записи, не прошедшие фильтры, отбрасываются. Фильтр — атрибут и образец, с которым
+  # значение сравнивается через ===: строка, Set, Range, Proc.
   #
-  #   reader = Gar::XmlReader.new(Gar::Schema.fetch(:houses), filters: { "ISACTUAL" => ["1"] }, region_code: "43")
+  #   reader = Gar::XmlReader.new(Gar::Schema.fetch(:houses), filters: { "ISACTUAL" => "1" }, region_code: "43")
   #   reader.read(io) { |chunk| conn.put_copy_data(chunk) }
   class XmlReader < Ox::Sax
     CHUNK_SIZE = 1 << 16
@@ -18,46 +19,27 @@ module Gar
     ESCAPE     = /[\\\t\n\r]/
     ESCAPES    = { "\\" => "\\\\", "\t" => "\\t", "\n" => "\\n", "\r" => "\\r" }.freeze
 
-    # Ox читает поток кусками по ~4 КБ, а каждое чтение из zip дорогое: отдаём ему куски
-    # из буфера, который пополняется по мегабайту
-    class BufferedIO
-      def initialize(io, size = 1 << 20)
-        @io       = io
-        @size     = size
-        @chunk    = "".b
-        @position = 0
-      end
-
-      def readpartial(length, _buffer = nil)
-        if @position >= @chunk.bytesize
-          @chunk = @io.read(@size)
-          raise EOFError if @chunk.nil? || @chunk.empty?
-
-          @position = 0
-        end
-        part = @chunk.byteslice(@position, length)
-        @position += part.bytesize
-        part
-      end
-    end
-
-    # filters — { "ISACTUAL" => ["1"] }: атрибут должен быть колонкой таблицы;
-    # region_code — код субъекта для колонки region_code (последняя в строке COPY)
+    # filters — { "ISACTUAL" => "1", "TYPEID" => Set["5", "7"] }: атрибут должен быть колонкой
+    # таблицы; region_code — код субъекта для колонки region_code (последняя в строке COPY)
     def initialize(table, filters: {}, region_code: nil)
       super()
       @element  = table.element.to_sym
       @index    = table.columns.each_with_index.to_h { |column, index| [column.attribute.to_sym, index] }
       @values   = Array.new(@index.size)
-      @filters  = filters.map { |attribute, allowed| [@index.fetch(attribute.to_sym), allowed.map(&:to_s)] }
+      @text     = table.columns.map { _1.type == :text } # спецсимволы COPY возможны только в тексте
+      @filters  = filters.map { |attribute, pattern| [@index.fetch(attribute.to_sym), pattern] }
       @line_end = table.region_code ? "\t#{region_code || NULL}\n" : "\n"
     end
 
-    # Разбирает поток и отдаёт блоку куски строк COPY; возвращает число принятых записей
+    # Разбирает поток (IO с readpartial или read) и отдаёт блоку куски строк COPY около
+    # CHUNK_SIZE байт; возвращает число принятых записей. Кусок — один и тот же буфер: после
+    # блока он очищается (память освобождается сразу, а не копится мусором до сборки), поэтому
+    # блок не должен его хранить — put_copy_data копирует данные.
     def read(io, &block)
       @block  = block
       @buffer = +""
       @count  = 0
-      Ox.sax_parse(self, BufferedIO.new(io))
+      Ox.sax_parse(self, io)
       flush
       @count
     end
@@ -72,15 +54,15 @@ module Gar
     def attr(name, value)
       return unless @inside
 
-      index = @index[name]
-      @values[index] = value if index
+      index = @index[name] or return
+      @values[index] = @text[index] ? escape(value) : value
     end
 
     def end_element(name)
       return unless @inside && name == @element
 
       @inside = false
-      return unless @filters.all? { |index, allowed| allowed.include?(@values[index]) }
+      return unless @filters.all? { |index, pattern| pattern === @values[index] } # rubocop:disable Style/CaseEquality
 
       @buffer << copy_line
       @count += 1
@@ -94,7 +76,7 @@ module Gar
     private
 
     def copy_line
-      @values.map { |value| value.nil? || value.empty? ? NULL : escape(value) }.join("\t") << @line_end
+      @values.map { |value| value.nil? || value.empty? ? NULL : value }.join("\t") << @line_end
     end
 
     def escape(value)
@@ -105,7 +87,7 @@ module Gar
       return if @buffer.empty?
 
       @block.call(@buffer)
-      @buffer = +""
+      @buffer.clear
     end
   end
 end

@@ -17,7 +17,7 @@ RSpec.describe Gar::XmlReader do
 
   def read(table, content, **options)
     chunks = []
-    count  = described_class.new(table, **options).read(StringIO.new(content.b)) { chunks << _1 }
+    count  = described_class.new(table, **options).read(StringIO.new(content.b)) { chunks << _1.dup }
     [count, chunks.join]
   end
 
@@ -59,12 +59,16 @@ RSpec.describe Gar::XmlReader do
     expect(read(houses, content, region_code: "43")).to eq([1, copy_line(houses, { "ID" => "1" }, "43")])
   end
 
-  it "отбрасывает записи, не прошедшие фильтры" do
+  it "отбрасывает записи, не прошедшие фильтры: значение сравнивается с образцом через ===" do
     params  = Gar::Schema.fetch(:house_params)
-    content = xml("PARAMS", '<PARAM ID="1" TYPEID="5" CHANGEIDEND="0" />', '<PARAM ID="2" TYPEID="8" CHANGEIDEND="0" />',
-                  '<PARAM ID="3" TYPEID="7" CHANGEIDEND="12" />', '<PARAM ID="4" TYPEID="7" CHANGEIDEND="0" />')
+    content = xml("PARAMS", '<PARAM ID="1" TYPEID="5" CHANGEIDEND="0" ENDDATE="2079-06-06" />',
+                  '<PARAM ID="2" TYPEID="8" CHANGEIDEND="0" ENDDATE="2079-06-06" />',
+                  '<PARAM ID="3" TYPEID="7" CHANGEIDEND="12" ENDDATE="2079-06-06" />',
+                  '<PARAM ID="4" TYPEID="7" CHANGEIDEND="0" ENDDATE="2079-06-06" />',
+                  '<PARAM ID="5" TYPEID="7" CHANGEIDEND="0" ENDDATE="2020-01-01" />')
+    filters = { "CHANGEIDEND" => "0", "TYPEID" => Set["5", "7"], "ENDDATE" => ("2026-01-01"..) }
 
-    count, lines = read(params, content, filters: { "CHANGEIDEND" => [0], "TYPEID" => [5, 7] })
+    count, lines = read(params, content, filters:)
 
     expect(count).to eq(2)
     expect(lines.lines.map { _1.split("\t").first }).to eq(["1", "4"])
@@ -81,7 +85,7 @@ RSpec.describe Gar::XmlReader do
     records = Array.new(3_000) { |index| %(<HOUSE ID="#{index}" HOUSENUM="#{'9' * 20}" ISACTUAL="1" />) }
     chunks  = []
 
-    count = described_class.new(houses, region_code: "43").read(trickle(xml("HOUSES", *records))) { chunks << _1 }
+    count = described_class.new(houses, region_code: "43").read(trickle(xml("HOUSES", *records))) { chunks << _1.dup }
 
     expect(count).to eq(3_000)
     expect(chunks.size).to be > 1

@@ -1,16 +1,12 @@
 # frozen_string_literal: true
 
-require "fileutils"
-require "tmpdir"
-
 # Сквозной конвейер: архив → импорт → пути → поиск → переключение схем. Страховочная сетка
 # рефакторинга (заведена в этапе 0 как характеризация 1.0.0). Ошибки из анализа
 # (docs/rails_integration_plan.md) описаны как pending с номером: после исправления
 # pending-пример «упадёт» — пометку нужно снять.
 RSpec.describe "Конвейер ГАР на синтетическом архиве", :db do
-  let(:archive)       { GarSampleArchive.build }
-  let(:archive_dir)   { Dir.mktmpdir("gar_pipeline") }
-  let(:zip_path)      { archive.write(archive_dir) }
+  include_context "с синтетическим архивом"
+
   let(:importer)      { Gar::Importer.new(db_connection) }
   let(:import_schema) { "gar_v20260116" }
 
@@ -32,8 +28,6 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
   end
 
   before { register_schema_for_cleanup(import_schema) }
-
-  after { FileUtils.rm_rf(archive_dir) }
 
   describe "импорт" do
     it "создаёт версионную схему со справочниками и таблицами минимального набора" do
@@ -91,7 +85,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
     end
 
     it "берёт версию из version.txt, а не из имени zip (ошибка 6)" do
-      zip = archive.write(archive_dir, name: "gar_xml.zip")
+      zip = archive_builder.write(archive_dir, name: "gar_xml.zip")
 
       expect(importer.import_full_base(zip)).to eq("gar_v20260116")
     end
@@ -134,6 +128,14 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(adm[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
       expect(adm[4_300_103]).to eq("Кировская обл, Киров г, Ленина ул, д. 10/2")
       expect(adm[4_300_104]).to eq("Кировская обл, Киров г, Ленина ул, д. 12") # корпус 2 теряется (Т8, этап 4)
+    end
+
+    it "без муниципальной иерархии строит только административные пути" do
+      Gar.configuration.hierarchies = [:adm]
+      schema = import_with_paths
+
+      expect(column_by_object(schema, "houses", "full_adm_path")[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
+      expect(column_by_object(schema, "houses", "full_mun_path").values.uniq).to eq([nil])
     end
 
     it "использует текущее название улицы в путях её домов" do

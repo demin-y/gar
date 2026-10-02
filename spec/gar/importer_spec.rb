@@ -1,23 +1,13 @@
 # frozen_string_literal: true
 
-require "fileutils"
-require "tmpdir"
-
 RSpec.describe Gar::Importer, :db do
-  let(:archive_dir) { Dir.mktmpdir("gar_importer") }
-  let(:builder)     { GarSampleArchive.build }
-  let(:zip_path)    { builder.write(archive_dir) }
-  let(:importer)    { described_class.new(db_connection) }
-  let(:schema)      { isolated_schema("gar_import") }
+  include_context "с синтетическим архивом"
 
-  after { FileUtils.rm_rf(archive_dir) }
+  let(:importer) { described_class.new(db_connection) }
+  let(:schema)   { isolated_schema("gar_import") }
 
   def import(**)
     importer.import_full_base(zip_path, schema:, **)
-  end
-
-  def tables_in(name)
-    db_connection.exec_params("SELECT tablename FROM pg_tables WHERE schemaname = $1", [name]).column_values(0).map(&:to_sym)
   end
 
   def values(table, column = "id")
@@ -133,7 +123,7 @@ RSpec.describe Gar::Importer, :db do
 
   describe "#import_full_base: ошибки" do
     it "без version.txt бросает ImportError и не создаёт схему" do
-      zip = builder.write(archive_dir, name: "broken.zip", version_txt: nil)
+      zip = archive_builder.write(archive_dir, name: "broken.zip", version_txt: nil)
 
       expect { importer.import_full_base(zip, schema:) }.to raise_error(Gar::ImportError, /нет version.txt/)
       expect(schema_exists?(schema)).to be(false)
@@ -148,16 +138,23 @@ RSpec.describe Gar::Importer, :db do
     end
 
     it "на повреждённом файле бросает ImportError с именем файла" do
-      builder.file("43/AS_HOUSES_20260115_broken.XML", %(<?xml version="1.0" encoding="utf-8"?><HOUSES><HOUSE ID="1"))
+      archive_builder.file("43/AS_HOUSES_20260115_broken.XML", %(<?xml version="1.0" encoding="utf-8"?><HOUSES><HOUSE ID="1"))
 
       expect { import }.to raise_error(Gar::ImportError, %r{43/AS_HOUSES_20260115_broken.XML: Ошибка разбора XML})
+    end
+
+    it "сообщает о гибели воркер-процесса и подсказывает, что делать при нехватке памяти" do
+      Gar.configuration.parallel_import = true
+      allow(Parallel).to receive(:each).and_raise(Parallel::DeadWorker)
+
+      expect { import }.to raise_error(Gar::ImportError, /не хватило памяти.*parallel_import_workers/)
     end
 
     it "передаёт ошибку из воркер-процесса" do
       skip "fork недоступен" unless Process.respond_to?(:fork)
       Gar.configuration.parallel_import          = true
       Gar.configuration.parallel_import_strategy = :processes
-      builder.file("43/AS_HOUSES_20260115_broken.XML", "<HOUSES><HOUSE")
+      archive_builder.file("43/AS_HOUSES_20260115_broken.XML", "<HOUSES><HOUSE")
 
       expect { import }.to raise_error(Gar::ImportError, %r{43/AS_HOUSES_20260115_broken.XML})
       expect(db_connection.exec("SELECT 1").getvalue(0, 0)).to eq("1")
