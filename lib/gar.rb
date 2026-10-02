@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "pg"
-require "httparty"
 require "logger"
 require_relative "gar/version"
 require_relative "gar/errors"
@@ -10,11 +9,10 @@ module Gar
   autoload :Archive,         "gar/archive"
   autoload :Configuration,   "gar/configuration"
   autoload :Loggable,        "gar/loggable"
-  autoload :NullLogger,      "gar/null_logger"
   autoload :Database,        "gar/database"
   autoload :Downloader,      "gar/downloader"
-  autoload :FullPathBuilder, "gar/full_path_builder"
   autoload :Importer,        "gar/importer"
+  autoload :PathBuilder,     "gar/path_builder"
   autoload :Schema,          "gar/schema"
   autoload :Search,          "gar/search"
   autoload :Utils,           "gar/utils"

@@ -29,7 +29,6 @@ module Gar
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :db_retry_max_attempts, :db_retry_base_delay
     attr_reader   :preset, :hierarchies
-    attr_writer   :logger
 
     def initialize
       @database_url                = ENV.fetch("DATABASE_URL", "postgresql://postgres:postgres@localhost:6432/gar_db_dev")
@@ -106,9 +105,13 @@ module Gar
       Schema::DICTIONARIES + (tables - skipped).map { Schema.fetch(_1) }
     end
 
-    def logger
-      @logger = resolve_logger(@logger) unless resolved_logger?(@logger)
-      @logger
+    # Логгер выбирается при каждом обращении: в Rails берётся текущий Rails.logger, даже если
+    # его заменили после настройки гема. nil — по умолчанию (Rails.logger или $stdout),
+    # false — без логов
+    def logger = @logger || default_logger
+
+    def logger=(value)
+      @logger = value == false ? Logger.new(File::NULL) : value
     end
 
     private
@@ -137,27 +140,9 @@ module Gar
       end
     end
 
-    def resolved_logger?(value)
-      value.is_a?(::Logger) || value.is_a?(NullLogger) || (defined?(ActiveSupport::Logger) && value.is_a?(ActiveSupport::Logger))
-    end
-
-    def resolve_logger(value)
-      case value
-      when false
-        NullLogger.new
-      when nil
-        default_logger
-      else
-        value
-      end
-    end
-
     def default_logger
-      if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
-        Rails.logger
-      else
-        Logger.new($stdout, level: Logger::INFO)
-      end
+      rails_logger = Rails.logger if defined?(Rails) && Rails.respond_to?(:logger)
+      rails_logger || (@stdout_logger ||= Logger.new($stdout, level: Logger::INFO))
     end
   end
 end

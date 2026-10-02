@@ -72,6 +72,31 @@ RSpec.describe Gar::Configuration do
     end
   end
 
+  describe "логгер" do
+    it "по умолчанию пишет в $stdout, а false отключает логи" do
+      expect { config.logger.info("видно") }.to output(/видно/).to_stdout_from_any_process
+
+      config.logger = false
+      expect { config.logger.info("не видно") }.not_to output.to_stdout_from_any_process
+    end
+
+    it "выбирается при первом обращении: берёт Rails.logger, настроенный после конфигурации" do
+      rails_logger = Logger.new(File::NULL)
+      stub_const("Rails", Module.new { define_singleton_method(:logger) { rails_logger } })
+
+      expect(config.logger).to be(rails_logger)
+    end
+
+    it "принимает свой логгер, nil возвращает выбор по умолчанию" do
+      custom = Logger.new(File::NULL)
+      config.logger = custom
+      expect(config.logger).to be(custom)
+
+      config.logger = nil
+      expect(config.logger).not_to be(custom)
+    end
+  end
+
   describe "Gar.reset_configuration!" do
     it "возвращает настройки по умолчанию" do
       Gar.configure { _1.preset = :full }

@@ -70,20 +70,20 @@ require "gar"
 Gar.configure do |config|
   config.database_url = 'postgresql://localhost/gar_db'
   config.database_schema = 'gar'
+  # config.logger = false  # без логов; по умолчанию — Rails.logger (если есть) или $stdout
 end
 
 # 2. Скачивание полной базы данных
 downloader = Gar::Downloader.new
 latest_version = downloader.latest_version
-zip_path = downloader.download_full_base(latest_version, show_progress: true)
+zip_path = downloader.download_full_base(latest_version)
 
 # 3. Импорт данных в PostgreSQL
 importer = Gar::Importer.new
 schema_name = importer.import_full_base(zip_path)
 
 # 4. Построение полных адресных путей (требуется для поиска!)
-builder = Gar::FullPathBuilder.new
-builder.populate_full_paths
+Gar::PathBuilder.new(schema: schema_name).build
 
 # 5. Переключение на новую схему
 importer.switch_to_imported_schema(schema_name)
@@ -118,11 +118,18 @@ versions.each do |v|
 end
 
 # Получение информации о конкретной версии по ID
-version_info = downloader.get_version_info(20241201)
+version_info = downloader.version_info(20241201)
 
-# Скачивание полной базы с прогресс-баром
-zip_path = downloader.download_full_base(latest, show_progress: true)
-# => "./downloads/full_base/gar_xml_full_20241201.zip"
+# Скачивание полной базы; on_progress получает скачанные и полные байты (total — nil,
+# если сервер не сообщил размер)
+zip_path = downloader.download_full_base(latest, on_progress: ->(done, total, _stage) { print "\r#{done}/#{total}" })
+# => "./downloads/full_base/gar_xml_v20241201.zip"
+```
+
+Архив качается в `<имя>.zip.part` и переименовывается, только когда скачан целиком: импорт не
+возьмёт недокачанный файл. После обрыва связи загрузка продолжается с места остановки (запрос
+`Range`), в том числе при следующем запуске. Уже скачанный архив повторно не качается. Ошибки
+сети и сервера — `Gar::DownloadError`.
 ```
 
 **Настройка загрузчика:**
@@ -134,6 +141,11 @@ Gar.configure do |config|
 
   # Отключение SSL верификации (при проблемах с сертификатами)
   config.api_ssl_verify = false
+
+  # Попыток подряд без прогресса при сетевых ошибках и пауза между ними, таймаут чтения
+  config.api_retry_attempts = 3
+  config.api_retry_timeout  = 5
+  config.api_read_timeout   = 30
 end
 ```
 
@@ -201,32 +213,17 @@ end
 **Важно:** Этот шаг обязателен для работы полнотекстового поиска! Методы `search_address_objects` и `search_houses` используют колонки `full_adm_path` и `full_mun_path`.
 
 ```ruby
-builder = Gar::FullPathBuilder.new
-
-# Полное обновление: добавление колонок, заполнение путей и создание индексов
-builder.update_address_objects_paths
-builder.update_houses_paths
-
-# Или только заполнение путей (если колонки уже созданы)
-builder.populate_address_objects_paths
-builder.populate_houses_paths
-
-# Заполнение только административных путей
-builder.populate_address_objects_adm_paths
-builder.populate_houses_adm_paths
-
-# Заполнение только муниципальных путей
-builder.populate_address_objects_mun_paths
-builder.populate_houses_mun_paths
+builder = Gar::PathBuilder.new(schema: "gar_v20260116") # по умолчанию — config.database_schema
+builder.build(batch_size: 25_000, on_progress: ->(done, total, _stage) { puts "#{done}/#{total}" })
 ```
 
-**Доступные методы:**
-- `update_address_objects_paths` — добавляет колонки `full_adm_path`, `full_mun_path`, `full_adm_path_tsv`, `full_mun_path_tsv`, заполняет пути и создаёт полнотекстовые индексы
-- `update_houses_paths` — аналогично для таблицы houses
-- `populate_address_objects_paths` — только заполняет пути для address_objects
-- `populate_houses_paths` — только заполняет пути для houses
-- `populate_address_objects_adm_paths` / `populate_address_objects_mun_paths` — только админ/мун пути для объектов
-- `populate_houses_adm_paths` / `populate_houses_mun_paths` — только админ/мун пути для домов
+`build` заполняет `full_adm_path`/`full_mun_path` и их `tsvector` у `address_objects` и `houses`
+и строит полнотекстовые индексы. Какие пути строить, решает состав схемы: путь по иерархии
+строится, только если она загружена (`config.hierarchies`). Путь собирается из действующих
+актуальных адресных объектов; дом без номера получает путь своей улицы.
+
+Заполняются только пустые пути, обе иерархии за один проход, батчами по возрастанию `id`: прерванное построение
+продолжается повторным `build`, а чтобы пересобрать часть путей, достаточно их очистить.
 
 **Примечание:** Процесс построения путей может занять несколько часов на полной базе. Каскадный поиск (`find_address_objects`, `find_houses`) работает без построения путей.
 
@@ -246,7 +243,7 @@ results = search.search_address_objects("Моск", autocomplete: true, limit: 5
 
 # Каскадный поиск по уровням
 regions = search.find_address_objects(level: 1, limit: 10)
-cities = search.find_address_objects(parent_guid: region_guid, level: [2, 5, 6])
+cities = search.find_address_objects(parent_guid: region_guid, level: 5)
 streets = search.find_address_objects(parent_guid: city_guid, level: 8)
 
 # Поиск домов
@@ -258,10 +255,6 @@ house_results = search.search_houses("д. 10", limit: 10)
 # Поиск по GUID
 address = search.find_address_object_by_guid("550e8400-e29b-41d4-a716-446655440000")
 house = search.find_house_by_guid("650e8400-e29b-41d4-a716-446655440000")
-
-# Получение иерархии адреса
-hierarchy = search.get_hierarchy(address.id, hierarchy_type: :adm)
-# => [807356, 162142236, 815937, 828325, 44870981, 44876904, 44877013]
 ```
 
 ## Схема базы данных
