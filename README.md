@@ -136,6 +136,49 @@ results.each { |r| puts r.full_adm_path }
 > - [3_populate_full_paths.rb](examples/3_populate_full_paths.rb) — построение адресных путей
 > - [4_switch_to_imported_schema.rb](examples/4_switch_to_imported_schema.rb) — переключение схем
 > - [5_search.rb](examples/5_search.rb) — примеры поиска
+> - [active_job_import.rb](examples/active_job_import.rb) — загрузка фоновой задачей Rails
+
+### Загрузка из приложения
+
+Шаги загрузки вызываются по отдельности, например из фоновой задачи, и сообщают прогресс через
+`on_progress: ->(done, total, stage) {}`. Каждый шаг сам открывает соединение с базой (без
+`statement_timeout`) и закрывает его; ошибки — исключения гема (`Gar::Error`).
+
+```ruby
+progress = ->(done, total, stage) { Rails.logger.info("#{stage}: #{done}/#{total}") }
+
+zip    = Gar.download(on_progress: progress)                   # :download — байты; Gar.download(version_id)
+schema = Gar.import(zip, region_codes: %w[43 11], on_progress: progress) # :import — байты XML, :indexes — таблицы
+Gar.build_paths(schema, on_progress: progress)                 # :paths — записи
+Gar.switch(schema, on_progress: progress)                      # :switch
+Gar.cleanup_schemas                                            # => имена удалённых схем
+
+Gar.current_version # => Gar::Meta текущей схемы (version_id, version_date, region_codes, status…) или nil
+```
+
+- **Имена схем.** Импорт идёт в `<database_schema>_v<версия>` (`gar_v20260116`), прежняя
+  текущая после `switch` становится резервной `<database_schema>_backup_v<версия>`. Резервных
+  остаётся `config.keep_backups` (по умолчанию 1), лишние удаляются после переключения.
+  `Gar.cleanup_schemas` удаляет лишние резервные и схемы импорта, которые уже не станут
+  текущими (прерванные и не новее текущей); текущую не трогает.
+- **Повторный запуск безопасен.** Скачанный архив не качается заново, схема, уже загруженная из
+  той же версии с теми же настройками (субъекты, таблицы, типы параметров, `keep_history`,
+  `prune_hierarchy`), не загружается повторно, а если она уже текущая и готова,
+  `Gar.import` возвращает текущую. Пути достраиваются только пустые — прерванный шаг
+  продолжается следующим вызовом.
+- **Один процесс за раз.** Импорт, построение путей, переключение и очистка держат advisory
+  lock PostgreSQL на `config.database_schema`, скачивание — блокировку файла `<zip>.lock`;
+  второй процесс сразу получает `Gar::LockedError`.
+- **Порядок.** `Gar.switch` переключает только готовую схему (статус `ready`, пути построены),
+  `Gar.build_paths` отказывается строить пути схемы, импорт в которую не завершён.
+- **Прогресс из потоков.** При параллельном импорте в потоках (`in_threads`) `on_progress`
+  вызывается из потоков импорта — по одному, но не из потока задачи: обработчик, который пишет
+  в базу приложения, берёт соединение сам (`connection_pool.with_connection`).
+- **Обновление.** Дельт пока нет: обновление — полный импорт нужных субъектов из новой выгрузки
+  и переключение. Пока новая схема загружается, поиск работает по текущей; переключение —
+  переименование схем в одной транзакции.
+
+Полный пример фоновой задачи с отчётом на пульте — [examples/active_job_import.rb](examples/active_job_import.rb).
 
 ### 1. Загрузка данных (Downloader)
 
@@ -191,13 +234,14 @@ end
 importer = Gar::Importer.new
 
 # Автоматический поиск последнего скачанного ZIP
-zip_path = importer.find_latest_full_base_zip
+zip_path = Gar::Importer.find_latest_full_base_zip
 
 # Импорт с созданием версионированной схемы
 # Схема будет названа gar_v20241201 (дата из архива)
 schema_name = importer.import_full_base(zip_path)
 
-# Переключение на новую схему (старая сохраняется как резервная)
+# Переключение на новую схему: старая становится резервной gar_backup_v<версия>,
+# резервные сверх config.keep_backups (по умолчанию 1) удаляются
 importer.switch_to_imported_schema(schema_name)
 ```
 

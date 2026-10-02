@@ -30,8 +30,13 @@ module TestDatabase
             "Запустите bin/setup_test_db (или make test-db-up) либо задайте TEST_DATABASE_URL."
     end
 
+    # Схемы и производные от них: импорт <имя>_v<версия>, резервные <имя>_backup_…
     def drop_schemas(names)
-      names&.each { |name| connection.exec("DROP SCHEMA IF EXISTS #{connection.quote_ident(name)} CASCADE") }
+      return if names.nil?
+
+      found = connection.exec_params("SELECT nspname FROM pg_namespace n, unnest($1::text[]) name WHERE nspname = name OR starts_with(nspname, name || '_')",
+                                     [PG::TextEncoder::Array.new.encode(names)]).column_values(0)
+      found.uniq.each { |name| connection.exec("DROP SCHEMA IF EXISTS #{connection.quote_ident(name)} CASCADE") }
     end
 
     # Соединение тестов — «соединение приложения»: в форкнутом ребёнке его отбрасывает само

@@ -86,6 +86,13 @@ RSpec.describe Gar::Configuration do
     end
   end
 
+  it "хранит одну резервную схему по умолчанию и принимает только неотрицательное число" do
+    expect(config.keep_backups).to eq(1)
+    config.keep_backups = "0"
+    expect(config.keep_backups).to eq(0)
+    [-1, "два", nil].each { |value| expect { config.keep_backups = value }.to raise_error(Gar::ConfigurationError, /keep_backups/) }
+  end
+
   describe "логгер" do
     it "по умолчанию пишет в $stdout, а false отключает логи" do
       expect { config.logger.info("видно") }.to output(/видно/).to_stdout_from_any_process

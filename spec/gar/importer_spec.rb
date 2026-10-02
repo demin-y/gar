@@ -93,7 +93,7 @@ RSpec.describe Gar::Importer, :db do
       Gar.configuration.region_codes = [43, "11"]
       progress = []
 
-      import(on_progress: ->(done, total, _stage) { progress << [done, total] })
+      import(on_progress: ->(done, total, stage) { progress << [done, total] if stage == :import })
 
       expect(values("houses", "region_code")).to eq(["11", "43"])
       expect(values("address_objects", "region_code")).to eq(["11", "43"])
@@ -152,7 +152,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(Gar::Meta.read(db_connection, schema)).to have_attributes(
         version_id: 20_260_116, version_date: Date.new(2026, 1, 16), region_codes: ["43"], param_types: [5, 7],
-        tables: Gar.configuration.import_tables.map(&:name), keep_history: [], prune_hierarchy: true,
+        tables: Gar.configuration.import_tables.map(&:name).sort, keep_history: [], prune_hierarchy: true,
         status: "imported", imported_at: be_within(60).of(Time.now), paths_built_at: nil, gem_version: Gar::VERSION
       )
     end
@@ -175,15 +175,19 @@ RSpec.describe Gar::Importer, :db do
       expect(analyzed).to include("houses", "address_objects", "house_params")
     end
 
-    it "сообщает о прогрессе в байтах XML от нуля до полного объёма" do
-      calls = []
-      total = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables).sum(&:size)
+    it "сообщает о прогрессе: байты XML от нуля до полного объёма, затем таблицы с индексами" do
+      calls  = []
+      total  = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables).sum(&:size)
+      tables = Gar.configuration.import_tables.size
 
       import(on_progress: ->(done, all, stage) { calls << [done, all, stage] })
 
-      expect(calls.first).to eq([0, total, :import])
-      expect(calls.last).to eq([total, total, :import])
-      expect(calls.map(&:first)).to eq(calls.map(&:first).sort)
+      loading, indexing = calls.partition { _3 == :import }
+      expect(loading.first).to eq([0, total, :import])
+      expect(loading.last).to eq([total, total, :import])
+      expect(loading.map(&:first)).to eq(loading.map(&:first).sort)
+      expect(indexing.map(&:first)).to eq((0..tables).to_a)
+      expect(calls.last).to eq([tables, tables, :indexes])
     end
   end
 
@@ -233,24 +237,34 @@ RSpec.describe Gar::Importer, :db do
     before { Gar.configuration.database_schema = current }
 
     it "делает схему текущей, а прежнюю текущую сохраняет как резервную с её версией" do
-      backup = register_schema_for_cleanup("gar_backup_v20260116")
       importer.switch_to_imported_schema(import)
       importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
 
       expect(table_count(current, "houses")).to eq(12)
-      expect(table_count(backup, "houses")).to eq(12)
+      expect(table_count("#{current}_backup_v20260116", "houses")).to eq(12)
       expect(schema_exists?(schema)).to be(false)
     end
 
     it "резервную копию схемы без gar_meta называет по времени" do
       db_connection.exec("CREATE SCHEMA #{current}")
-      before = db_connection.exec("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gar\\_backup\\_2%'").column_values(0)
 
       importer.switch_to_imported_schema(import)
 
-      backups = db_connection.exec("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'gar\\_backup\\_2%'").column_values(0) - before
-      backups.each { register_schema_for_cleanup(_1) }
-      expect(backups).to contain_exactly(match(/\Agar_backup_\d{8}_\d{6}\z/))
+      expect(Gar::Schemas.backups(db_connection, current)).to contain_exactly(match(/\A#{current}_backup_\d{8}_\d{6}\z/))
+    end
+
+    it "хранит не больше config.keep_backups резервных схем, удаляя самые старые" do
+      Gar.configuration.keep_backups = 1
+      db_connection.exec("CREATE SCHEMA #{current}")
+      importer.switch_to_imported_schema(import)
+      importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
+
+      expect(Gar::Schemas.backups(db_connection, current)).to eq(["#{current}_backup_v20260116"])
+
+      Gar.configuration.keep_backups = 0
+      importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
+      expect(Gar::Schemas.backups(db_connection, current)).to eq([])
+      expect(table_count(current, "houses")).to eq(12)
     end
 
     it "отвергает пустое имя и несуществующую схему, текущую оставляет как есть" do
@@ -262,22 +276,22 @@ RSpec.describe Gar::Importer, :db do
     end
   end
 
-  describe "#find_latest_full_base_zip" do
+  describe ".find_latest_full_base_zip" do
     it "возвращает самый свежий zip в каталоге или nil" do
       old_zip = File.join(archive_dir, "gar_xml_v1.zip").tap { FileUtils.touch(_1, mtime: Time.now - 60) }
       new_zip = File.join(archive_dir, "gar_xml_v2.zip").tap { FileUtils.touch(_1) }
 
-      expect(importer.find_latest_full_base_zip(directory: archive_dir)).to eq(new_zip)
-      expect(importer.find_latest_full_base_zip(directory: File.join(archive_dir, "missing"))).to be_nil
+      expect(described_class.find_latest_full_base_zip(directory: archive_dir)).to eq(new_zip)
+      expect(described_class.find_latest_full_base_zip(directory: File.join(archive_dir, "missing"))).to be_nil
       FileUtils.rm([old_zip, new_zip])
-      expect(importer.find_latest_full_base_zip(directory: archive_dir)).to be_nil
+      expect(described_class.find_latest_full_base_zip(directory: archive_dir)).to be_nil
     end
 
     it "по умолчанию ищет в config.full_base_dir" do
       Gar.configuration.full_base_dir = archive_dir
       zip = File.join(archive_dir, "gar_xml_v1.zip").tap { FileUtils.touch(_1) }
 
-      expect(importer.find_latest_full_base_zip).to eq(zip)
+      expect(described_class.find_latest_full_base_zip).to eq(zip)
     end
   end
 end

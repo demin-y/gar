@@ -14,7 +14,7 @@ begin
 
   # Находим последний скачанный ZIP файл для определения версии
   puts "Поиск последнего скачанного ZIP файла..."
-  zip_path = importer.find_latest_full_base_zip
+  zip_path = Gar::Importer.find_latest_full_base_zip
 
   if zip_path.nil?
     puts "⚠️  ZIP файлы не найдены в #{Gar.configuration.full_base_dir}"

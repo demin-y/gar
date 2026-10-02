@@ -16,4 +16,7 @@ module Gar
 
   # Ошибка импорта архива в базу
   class ImportError < Error; end
+
+  # Базу ГАР уже изменяет другой процесс (импорт, пути, переключение схем): повторить позже
+  class LockedError < Error; end
 end

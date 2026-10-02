@@ -32,12 +32,10 @@ module Gar
         conn = Database.create_connection if own
         check_replaceable(conn, schema)
 
-        staging = Importer.new(conn).import_full_base(Sample.archive, schema: "#{schema}_fixtures_load", parallel: false)
-        PathBuilder.new(conn, schema: staging).build
-        conn.transaction do
-          conn.exec("DROP SCHEMA IF EXISTS #{Schema.quote(schema)} CASCADE")
-          conn.exec("ALTER SCHEMA #{Schema.quote(staging)} RENAME TO #{Schema.quote(schema)}")
-          conn.exec("COMMENT ON SCHEMA #{Schema.quote(schema)} IS #{conn.escape_literal(MARK)}")
+        Database.with_lock(conn, "Загрузка тестового набора в схему #{schema}") do
+          staging = Importer.new(conn).import_full_base(Sample.archive, schema: "#{schema}_fixtures_load", parallel: false)
+          PathBuilder.new(conn, schema: staging).build
+          Schemas.replace(conn, staging, schema) { conn.exec("COMMENT ON SCHEMA #{Schema.quote(schema)} IS #{conn.escape_literal(MARK)}") }
         end
         schema
       ensure

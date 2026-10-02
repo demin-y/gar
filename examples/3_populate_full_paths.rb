@@ -15,7 +15,7 @@ require "gar"
 
 schema = ARGV[0]
 unless schema
-  zip_path = Gar::Importer.new.find_latest_full_base_zip
+  zip_path = Gar::Importer.find_latest_full_base_zip
   abort "ZIP файлы не найдены в #{Gar.configuration.full_base_dir}" unless zip_path
 
   schema = "gar_v#{Gar::Archive.new(zip_path).version_id}"

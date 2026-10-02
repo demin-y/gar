@@ -10,9 +10,10 @@ module Gar
   # Сведения о выгрузках ГАР (API ФНС) и загрузка архивов.
   #
   # Архив качается в <имя>.zip.part и переименовывается только целиком, поэтому импорт
-  # (Importer#find_latest_full_base_zip) никогда не берёт недокачанный файл. Обрыв связи
+  # (Importer.find_latest_full_base_zip) никогда не берёт недокачанный файл. Обрыв связи
   # не теряет скачанное: следующая попытка (или следующий запуск) продолжает .part
-  # запросом Range. Число попыток подряд без прогресса — api_retry_attempts.
+  # запросом Range. Число попыток подряд без прогресса — api_retry_attempts. Один архив качает
+  # один процесс (блокировка <архив>.lock), второй получает LockedError.
   class Downloader
     include Loggable
 
@@ -94,12 +95,26 @@ module Gar
       end
 
       FileUtils.mkdir_p(target_dir)
-      part = "#{path}.part"
-      logger.info "Скачивание #{url} в #{path}"
-      with_retries(url, progress: -> { file_size(part) }) { fetch(URI(url), part, on_progress) }
-      File.rename(part, path)
-      logger.info "Файл скачан: #{path} (#{Utils.format_size(File.size(path))})"
-      path
+      with_file_lock(path) do
+        next path if File.exist?(path) # скачал другой процесс, пока ждали
+
+        part = "#{path}.part"
+        logger.info "Скачивание #{url} в #{path}"
+        with_retries(url, progress: -> { file_size(part) }) { fetch(URI(url), part, on_progress) }
+        File.rename(part, path)
+        logger.info "Файл скачан: #{path} (#{Utils.format_size(File.size(path))})"
+        path
+      end
+    end
+
+    # Один процесс на архив: блокировка файла <архив>.lock; занят — LockedError
+    def with_file_lock(path)
+      lock = "#{path}.lock"
+      File.open(lock, File::RDWR | File::CREAT) do |file|
+        raise LockedError, "Архив #{File.basename(path)} уже скачивает другой процесс" unless file.flock(File::LOCK_EX | File::LOCK_NB)
+
+        yield.tap { File.delete(lock) }
+      end
     end
 
     # Дописывает part с текущего размера; сервер без Range отдаёт файл заново (200). Если part

@@ -36,9 +36,38 @@ module Gar
     # Заполняет пустые пути и строит их индексы, затем отмечает в gar_meta, что схема готова.
     # on_progress — ->(done, total, stage): просмотренные записи с пустым путём, stage = :paths.
     # Возвращает число записей, у которых заполнился хотя бы один путь; записи без строки в
-    # иерархии остаются пустыми. Без адресных объектов или иерархий — ConfigurationError.
+    # иерархии остаются пустыми. Без адресных объектов или иерархий — ConfigurationError; база
+    # занята другой изменяющей операцией — LockedError.
     def build(batch_size: 25_000, on_progress: nil)
+      Database.with_lock(db_conn, "Построение путей схемы #{schema}") { build_paths(batch_size, on_progress) }
+    end
+
+    # Очищает пути объектов object_ids (OBJECTID) и всех их потомков — записей, в пути которых
+    # они есть, — чтобы build пересобрал их: после переименования, переноса в иерархии или
+    # удаления объекта. Возвращает число очищенных записей
+    def invalidate(object_ids)
+      return 0 if hierarchies.empty?
+
+      ids   = Database.array(object_ids.map { Integer(_1) })
+      reset = hierarchies.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
+      found = ["object_id = ANY($1::bigint[])", *hierarchies.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
+
+      Database.with_lock(db_conn, "Очистка путей схемы #{schema}") do
+        tables.sum { db_conn.exec_params("UPDATE #{qualified(_1)} SET #{reset} WHERE #{found}", [ids]).cmd_tuples }
+      end
+    end
+
+    # Таблицы с путями
+    def tables = Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
+
+    # Загруженные иерархии
+    def hierarchies = @hierarchies ||= Configuration::HIERARCHY_TABLES.select { table_exists?(_2) }.keys
+
+    private
+
+    def build_paths(batch_size, on_progress)
       raise ConfigurationError, "В схеме #{schema} нет адресных объектов: пути строить не из чего" unless table_exists?(:address_objects)
+      raise ImportError, "Импорт в схему #{schema} не завершён: пути строятся после него" if Meta.read(db_conn, schema)&.status == "importing"
       raise ConfigurationError, "В схеме #{schema} нет ни одной иерархии (adm_hierarchy, mun_hierarchy)" if hierarchies.empty?
 
       tables      = self.tables
@@ -59,27 +88,6 @@ module Gar
       Meta.update(db_conn, schema, "ready")
       updated
     end
-
-    # Очищает пути объектов object_ids (OBJECTID) и всех их потомков — записей, в пути которых
-    # они есть, — чтобы build пересобрал их: после переименования, переноса в иерархии или
-    # удаления объекта. Возвращает число очищенных записей
-    def invalidate(object_ids)
-      return 0 if hierarchies.empty?
-
-      ids   = Database.array(object_ids.map { Integer(_1) })
-      reset = hierarchies.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
-      found = ["object_id = ANY($1::bigint[])", *hierarchies.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
-
-      tables.sum { db_conn.exec_params("UPDATE #{qualified(_1)} SET #{reset} WHERE #{found}", [ids]).cmd_tuples }
-    end
-
-    # Таблицы с путями
-    def tables = Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
-
-    # Загруженные иерархии
-    def hierarchies = @hierarchies ||= Configuration::HIERARCHY_TABLES.select { table_exists?(_2) }.keys
-
-    private
 
     # Батчи по id с временным частичным индексом по пустым путям; блок получает число
     # просмотренных записей. Курсор id пропускает записи, путь которых не собрался
