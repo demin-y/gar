@@ -15,11 +15,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
   end
 
   def import_with_paths
-    importer.import_full_base(zip_path).tap do |schema|
-      builder = Gar::FullPathBuilder.new(db_connection, schema_name: schema)
-      builder.update_address_objects_paths
-      builder.update_houses_paths
-    end
+    importer.import_full_base(zip_path).tap { |schema| Gar::PathBuilder.new(db_connection, schema:).build }
   end
 
   def column_by_object(schema, table, column)

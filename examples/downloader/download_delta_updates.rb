@@ -29,7 +29,7 @@ begin
     puts ""
 
     puts "Скачивание..."
-    zip_path = downloader.download_delta(latest, show_progress: true)
+    zip_path = downloader.download_delta(latest, on_progress: ->(done, total, _) { print "\r#{done}/#{total}" })
     puts "✓ ZIP файл скачан: #{zip_path}"
   else
     puts "✗ Дельта обновления недоступны для этой версии"

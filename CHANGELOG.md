@@ -5,6 +5,35 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Пути, загрузчик, конфигурация (этап 2)
+
+**Несовместимые изменения**
+- `Gar::FullPathBuilder` заменён `Gar::PathBuilder.new(conn, schema:).build(batch_size:,
+  on_progress:)`. Методы `update_*_paths` и `populate_*_paths` удалены: какие пути строить,
+  решает состав схемы (загруженные `address_objects`, `houses` и иерархии). Колонки путей
+  создаёт импорт, `ALTER TABLE` больше не нужен.
+- `Downloader#download_full_base` и `#download_delta` принимают `on_progress:
+  ->(done, total, stage)` (байты, `stage = :download`) вместо `show_progress:` и больше
+  не печатают в `$stdout`. Сетевые ошибки после всех попыток — `Gar::DownloadError`;
+  `version_info` для неизвестной версии — тоже `Gar::DownloadError`.
+- Зависимость `httparty` удалена (загрузчик на `Net::HTTP`).
+- `Gar::NullLogger` удалён: `config.logger = false` даёт `Logger.new(File::NULL)`.
+
+**Новое**
+- Архив качается в `<имя>.zip.part` и переименовывается только целиком; после обрыва
+  загрузка продолжается запросом `Range`, в том числе при следующем запуске. Уже скачанный
+  архив повторно не качается. Попытки (`api_retry_attempts`) считаются подряд без
+  прогресса.
+- Логгер выбирается при первом обращении: `Rails.logger`, настроенный после конфигурации
+  гема, тоже подхватывается.
+- `PathBuilder#build` возобновляем: заполняет только пустые пути, батч — один запрос.
+
+**Исправлено**
+- В пути попадали неактуальные записи адресных объектов (`is_active` без `is_actual`): при
+  импорте с историей названия дублировались.
+- Путь дома без номера (`house_num IS NULL`) был пустым — теперь это путь улицы.
+- README: удалены несуществующие `populate_full_paths`, `get_hierarchy`, `get_version_info`.
+
 ### Импорт (этап 1)
 
 **Несовместимые изменения**
@@ -44,7 +73,6 @@
 - `config.import_maintenance_work_mem` — память PostgreSQL на построение индексов (по
   умолчанию не задаётся: действует настройка сервера).
 - Гибель воркера (например, от нехватки памяти) — `Gar::ImportError` с подсказкой.
-- `FullPathBuilder` пропускает незагруженную иерархию (`config.hierarchies = [:adm]`).
 - `Gar.reset_configuration!`.
 
 **Исправлено**

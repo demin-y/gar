@@ -29,7 +29,7 @@ module Gar
       tables   = Gar.configuration.import_tables
       jobs     = archive.jobs(tables, region_codes:)
 
-      logger.info "Импорт ГАР версии #{archive.version_id} в схему #{schema}: #{jobs.size} файлов, #{megabytes(jobs.sum(&:size))} XML"
+      logger.info "Импорт ГАР версии #{archive.version_id} в схему #{schema}: #{jobs.size} файлов, #{Utils.format_size(jobs.sum(&:size))} XML"
       warn_missing_regions(jobs, region_codes)
       create_schema(schema, tables)
       load_data(archive, jobs, schema, on_progress)
@@ -92,7 +92,7 @@ module Gar
 
       each_loaded(archive, jobs, schema) do |job, count|
         done += job.size
-        logger.info "  #{job}: #{count} записей, #{megabytes(job.size)} (#{total.zero? ? 100 : done * 100 / total}%)"
+        logger.info "  #{job}: #{count} записей, #{Utils.format_size(job.size)} (#{total.zero? ? 100 : done * 100 / total}%)"
         on_progress&.call(done, total, :import)
       end
     end
@@ -210,7 +210,5 @@ module Gar
     def version_table(schema) = "#{quote(schema)}.database_version"
 
     def quote(identifier) = Schema.quote(identifier)
-
-    def megabytes(bytes) = format("%.1f МБ", bytes / 1_048_576.0)
   end
 end

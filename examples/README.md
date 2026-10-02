@@ -65,27 +65,16 @@ examples/
 ./examples/downloader/cleanup_old_files.rb
 ```
 
-## Компонент: FullPathBuilder
+## Компонент: PathBuilder
 
-Примеры работы с `Gar::FullPathBuilder` для построения полных адресных путей.
+### 3_populate_full_paths.rb
+Заполнение `full_adm_path` и `full_mun_path` (и их `tsvector`) у адресных объектов и домов
+в импортированной схеме. Прерванное построение продолжается повторным запуском.
 
-### full_path_builder/populate_full_paths.rb
-Заполнение колонок `full_adm_path` и `full_mun_path` для адресных объектов и домов.
-
-**Требования:**
-- PostgreSQL должен быть запущен
-- База данных должна содержать импортированные данные ГАР
-
-**Запуск:**
 ```bash
-# Запустить dev БД
 make dev-db-up
-
-# Запустить пример
-./examples/full_path_builder/populate_full_paths.rb
+./examples/3_populate_full_paths.rb [схема]
 ```
-
-**Примечание:** Этот процесс может занять значительное время на больших объёмах данных.
 
 ## Компонент: Address (Низкоуровневые операции)
 

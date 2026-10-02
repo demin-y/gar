@@ -2,395 +2,149 @@
 
 require "webmock/rspec"
 require "fileutils"
-require "tempfile"
+require "tmpdir"
 
 RSpec.describe Gar::Downloader do
   let(:downloader) { described_class.new }
+  let(:dir)        { Dir.mktmpdir("gar_downloads") }
+  let(:api)        { "https://fias.nalog.ru/WebServices/Public" }
+  let(:url)        { "https://fias-file.nalog.ru/downloads/2026.01.16/gar_xml.zip" }
+  let(:zip)        { File.join(dir, "gar_xml_v20260116.zip") }
+  let(:version)    { { "VersionId" => 20_260_116, "GarXMLFullURL" => url, "GarXMLDeltaURL" => url.sub("gar_xml", "gar_delta_xml") } }
 
   before do
     WebMock.disable_net_connect!
+    Gar.configure do |config|
+      config.full_base_dir     = dir
+      config.delta_dir         = File.join(dir, "delta")
+      config.api_retry_timeout = 0
+    end
   end
 
   after do
     WebMock.allow_net_connect!
+    FileUtils.rm_rf(dir)
   end
 
-  # ============================================================================
-  # API методы — получение информации о версиях
-  # ============================================================================
+  describe "сведения о версиях" do
+    it "возвращает последнюю версию и все версии из API ФНС" do
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(body: version.to_json)
+      stub_request(:get, "#{api}/GetAllDownloadFileInfo").to_return(body: [version, { "VersionId" => 1 }].to_json)
 
-  describe "#all_versions" do
-    let(:mock_versions) { [{ "VersionId" => 1, "Date" => "2023-01-01" }] }
-    let(:base_url) { "https://example.com" }
-
-    context "when SSL verification is enabled" do
-      before do
-        allow(Gar.configuration).to receive_messages(
-          api_ssl_verify:       true,
-          api_all_versions_url: "#{base_url}/GetAllDownloadFileInfo"
-        )
-        stub_request(:get, "#{base_url}/GetAllDownloadFileInfo")
-          .to_return(body: mock_versions.to_json)
-      end
-
-      it "получает все версии из FIAS API" do
-        versions = downloader.all_versions
-        expect(versions).to eq(mock_versions)
-      end
-
-      it "выполняет корректный HTTP запрос" do
-        downloader.all_versions
-        expect(WebMock).to have_requested(:get, "#{base_url}/GetAllDownloadFileInfo")
-      end
+      expect(downloader.latest_version).to eq(version)
+      expect(downloader.all_versions.size).to eq(2)
+      expect(downloader.version_info(20_260_116)).to eq(version)
     end
 
-    context "when SSL verification is disabled" do
-      before do
-        allow(Gar.configuration).to receive_messages(
-          api_ssl_verify:       false,
-          api_all_versions_url: "#{base_url}/GetAllDownloadFileInfo"
-        )
-        stub_request(:get, "#{base_url}/GetAllDownloadFileInfo")
-          .to_return(body: mock_versions.to_json)
-      end
+    it "сообщает об отсутствующей версии, ошибке API и неверном JSON как DownloadError" do
+      stub_request(:get, "#{api}/GetAllDownloadFileInfo").to_return(body: "[]")
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(status: 500).then.to_return(body: "<html>")
 
-      it "отключает SSL верификацию" do
-        allow(Gar.logger).to receive(:warn)
-        downloader.all_versions
-        expect(Gar.logger).to have_received(:warn).with(/SSL верификация отключена/)
-        expect(WebMock).to have_requested(:get, "#{base_url}/GetAllDownloadFileInfo")
-      end
+      expect { downloader.version_info(1) }.to raise_error(Gar::DownloadError, /Версия 1 не найдена/)
+      expect { downloader.latest_version }.to raise_error(Gar::DownloadError, /500/)
+      expect { downloader.latest_version }.to raise_error(Gar::DownloadError, /JSON/)
+    end
+
+    it "повторяет запрос при сетевой ошибке" do
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_raise(Errno::ECONNRESET).then.to_return(body: version.to_json)
+
+      expect(downloader.latest_version).to eq(version)
     end
   end
 
-  describe "#latest_version" do
-    let(:mock_version) { { "VersionId" => 123, "Date" => "2023-12-01" } }
-    let(:base_url) { "https://example.com" }
+  describe "загрузка архива" do
+    it "скачивает полную выгрузку под именем с версией и сообщает прогресс" do
+      stub_request(:get, url).to_return(body: "0123456789", headers: { "Content-Length" => "10" })
+      progress = []
 
-    context "when SSL verification is enabled" do
-      before do
-        allow(Gar.configuration).to receive_messages(
-          api_ssl_verify:         true,
-          api_latest_version_url: "#{base_url}/GetLastDownloadFileInfo"
-        )
-        stub_request(:get, "#{base_url}/GetLastDownloadFileInfo")
-          .to_return(body: mock_version.to_json)
-      end
-
-      it "получает последнюю версию из FIAS API" do
-        version = downloader.latest_version
-        expect(version).to eq(mock_version)
-      end
+      expect(downloader.download_full_base(version, on_progress: ->(*args) { progress << args })).to eq(zip)
+      expect(File.read(zip)).to eq("0123456789")
+      expect(progress.first).to eq([0, 10, :download])
+      expect(progress.last).to eq([10, 10, :download])
+      expect(Dir.children(dir)).to eq([File.basename(zip)])
     end
 
-    context "when SSL verification is disabled" do
-      before do
-        allow(Gar.configuration).to receive_messages(
-          api_ssl_verify:         false,
-          api_latest_version_url: "#{base_url}/GetLastDownloadFileInfo"
-        )
-        stub_request(:get, "#{base_url}/GetLastDownloadFileInfo")
-          .to_return(body: mock_version.to_json)
-      end
+    it "скачивает дельту в delta_dir" do
+      stub_request(:get, version["GarXMLDeltaURL"]).to_return(body: "delta")
 
-      it "отключает SSL верификацию" do
-        allow(Gar.logger).to receive(:warn)
-        downloader.latest_version
-        expect(Gar.logger).to have_received(:warn).with(/SSL верификация отключена/)
-      end
-    end
-  end
+      path = downloader.download_delta(version)
 
-  describe "#version_info" do
-    let(:version_id) { 123 }
-    let(:mock_versions) do
-      [
-        { "VersionId" => 121, "Date" => "2023-01-01" },
-        { "VersionId" => version_id, "Date" => "2023-12-01" },
-        { "VersionId" => 125, "Date" => "2024-01-01" }
-      ]
+      expect(path).to eq(File.join(dir, "delta", "gar_delta_xml_v20260116.zip"))
+      expect(File.read(path)).to eq("delta")
     end
 
-    before do
-      allow(downloader).to receive(:all_versions).and_return(mock_versions)
+    it "продолжает недокачанный .part запросом Range" do
+      File.write("#{zip}.part", "01234")
+      stub_request(:get, url).with(headers: { "Range" => "bytes=5-" })
+                             .to_return(status: 206, body: "56789", headers: { "Content-Range" => "bytes 5-9/10" })
+
+      downloader.download_full_base(version)
+
+      expect(File.read(zip)).to eq("0123456789")
+      expect(File.exist?("#{zip}.part")).to be(false)
     end
 
-    it "возвращает информацию о версии по version_id" do
-      version = downloader.version_info(version_id)
-      expect(version["VersionId"]).to eq(version_id)
+    it "начинает заново, если сервер не поддерживает Range" do
+      File.write("#{zip}.part", "xxxxx")
+      stub_request(:get, url).to_return(status: 200, body: "0123456789")
+
+      downloader.download_full_base(version)
+
+      expect(File.read(zip)).to eq("0123456789")
     end
 
-    it "выбрасывает ошибку для несуществующей версии" do
-      expect { downloader.version_info(999) }.to raise_error(Gar::Error, "Версия 999 не найдена")
-    end
-  end
+    it "переименовывает .part, если он уже содержит весь файл" do
+      File.write("#{zip}.part", "0123456789")
+      stub_request(:get, url).to_return(status: 416, headers: { "Content-Range" => "bytes */10" })
 
-  # ============================================================================
-  # Методы загрузки — высокоуровневые операции
-  # ============================================================================
+      downloader.download_full_base(version)
 
-  describe "#download_full_base" do
-    let(:version_info) { { "GarXMLFullURL" => "http://example.com/full.zip", "VersionId" => 123 } }
-
-    before do
-      allow(downloader).to receive(:download).and_return("/path/to/file.zip")
+      expect(File.read(zip)).to eq("0123456789")
     end
 
-    it "вызывает download с корректными параметрами" do
-      zip_path = downloader.download_full_base(version_info)
-      expect(downloader).to have_received(:download).with(
-        "http://example.com/full.zip",
-        anything,
-        hash_including(version_id: 123, show_progress: false)
-      )
-      expect(zip_path).to eq("/path/to/file.zip")
+    it "не скачивает архив повторно" do
+      File.write(zip, "готово")
+
+      expect(downloader.download_full_base(version)).to eq(zip)
+      expect(WebMock).not_to have_requested(:get, url)
     end
 
-    context "with show_progress enabled" do
-      it "передаёт show_progress в download" do
-        downloader.download_full_base(version_info, show_progress: true)
-        expect(downloader).to have_received(:download).with(
-          anything,
-          anything,
-          hash_including(show_progress: true)
-        )
-      end
+    it "повторяет загрузку при сетевых ошибках" do
+      stub_request(:get, url).to_raise(Net::ReadTimeout).then.to_timeout.then.to_return(body: "0123456789")
+
+      downloader.download_full_base(version)
+
+      expect(File.read(zip)).to eq("0123456789")
+    end
+
+    it "после api_retry_attempts неудачных попыток подряд — DownloadError, без готового zip" do
+      stub_request(:get, url).to_raise(Errno::ECONNRESET)
+
+      expect { downloader.download_full_base(version) }.to raise_error(Gar::DownloadError, /3 попыток/)
+      expect(WebMock).to have_requested(:get, url).times(3)
+      expect(File.exist?(zip)).to be(false)
+    end
+
+    it "не принимает файл, размер которого не совпал с заявленным" do
+      stub_request(:get, url).to_return(body: "01234", headers: { "Content-Length" => "10" })
+
+      expect { downloader.download_full_base(version) }.to raise_error(Gar::DownloadError, /Размер файла/)
+      expect(File.exist?(zip)).to be(false)
+    end
+
+    it "сообщает об ошибке сервера как DownloadError" do
+      stub_request(:get, url).to_return(status: 404)
+
+      expect { downloader.download_full_base(version) }.to raise_error(Gar::DownloadError, /404/)
     end
   end
-
-  describe "#download_delta" do
-    let(:version_info) { { "GarXMLDeltaURL" => "http://example.com/delta.zip", "VersionId" => 123 } }
-
-    before do
-      allow(downloader).to receive(:download).and_return("/path/to/file.zip")
-    end
-
-    it "вызывает download с корректными параметрами" do
-      zip_path = downloader.download_delta(version_info)
-      expect(downloader).to have_received(:download).with(
-        "http://example.com/delta.zip",
-        anything,
-        hash_including(version_id: 123, show_progress: false)
-      )
-      expect(zip_path).to eq("/path/to/file.zip")
-    end
-
-    context "with show_progress enabled" do
-      it "передаёт show_progress в download" do
-        downloader.download_delta(version_info, show_progress: true)
-        expect(downloader).to have_received(:download).with(
-          anything,
-          anything,
-          hash_including(show_progress: true)
-        )
-      end
-    end
-  end
-
-  describe "#download (private)" do
-    let(:url) { "http://example.com/file.zip" }
-    let(:target_dir) { Dir.mktmpdir }
-    let(:version_id) { 123 }
-
-    before do
-      stub_request(:head, url)
-        .to_return(status: 200, headers: { "Content-Length" => "1000" })
-      stub_request(:get, url)
-        .to_return(status: 200, body: "fake zip content")
-      allow(downloader).to receive(:download_file)
-      allow(downloader).to receive(:generate_filename).and_return("file_v123.zip")
-      allow(File).to receive(:size).and_return(1000)
-    end
-
-    after do
-      FileUtils.rm_rf(target_dir)
-    end
-
-    it "создаёт целевую директорию если она не существует" do
-      FileUtils.rm_rf(target_dir)
-      downloader.send(:download, url, target_dir, version_id: version_id)
-      expect(Dir.exist?(target_dir)).to be true
-    end
-
-    it "генерирует имя файла с version_id" do
-      downloader.send(:download, url, target_dir, version_id: version_id)
-      expect(downloader).to have_received(:generate_filename).with(url, version_id)
-    end
-
-    it "вызывает download_file с корректными параметрами" do
-      downloader.send(:download, url, target_dir, version_id: version_id, show_progress: false)
-      expect(downloader).to have_received(:download_file).with(url, anything, show_progress: false)
-    end
-
-    it "возвращает путь к скачанному файлу" do
-      zip_path = downloader.send(:download, url, target_dir, version_id: version_id)
-      expect(zip_path).to be_a(String)
-      expect(zip_path).to include("file_v123.zip")
-    end
-
-    context "with show_progress enabled" do
-      it "передаёт show_progress в download_file" do
-        downloader.send(:download, url, target_dir, version_id: version_id, show_progress: true)
-        expect(downloader).to have_received(:download_file).with(anything, anything, show_progress: true)
-      end
-    end
-  end
-
-  describe "#download_file (private)" do
-    let(:url) { "http://example.com/file.zip" }
-    let(:destination_path) { File.join(Dir.mktmpdir, "file.zip") }
-    let(:temp_dir) { File.dirname(destination_path) }
-
-    before do
-      allow(Gar.configuration).to receive_messages(api_retry_attempts: 3, api_retry_timeout: 0.01)
-      stub_request(:head, url)
-        .to_return(status: 200, headers: { "Content-Length" => "1000" })
-      FileUtils.mkdir_p(temp_dir)
-    end
-
-    after do
-      FileUtils.rm_rf(temp_dir)
-    end
-
-    context "when download succeeds" do
-      before do
-        stub_request(:get, url)
-          .to_return(status: 200, body: "fake zip content")
-        allow(File).to receive(:exist?).with(destination_path).and_return(false)
-        allow(File).to receive(:size).with(destination_path).and_return(0, 1000)
-        allow(downloader).to receive(:perform_download).and_return(1000)
-      end
-
-      it "загружает файл успешно" do
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "вызывает perform_download с корректными параметрами" do
-        downloader.send(:download_file, url, destination_path, show_progress: false)
-        expect(downloader).to have_received(:perform_download).with(
-          url, destination_path, false, 0, false
-        )
-      end
-    end
-
-    context "when resuming download" do
-      before do
-        allow(File).to receive(:exist?).with(destination_path).and_return(true)
-        allow(File).to receive(:size).with(destination_path).and_return(500, 1000)
-        stub_request(:get, url)
-          .with(headers: { "Range" => "bytes=500-" })
-          .to_return(status: 206, body: "remaining content")
-        allow(downloader).to receive(:perform_download).and_return(1000)
-      end
-
-      it "возобновляет загрузку с существующего файла" do
-        downloader.send(:download_file, url, destination_path)
-        expect(downloader).to have_received(:perform_download).with(
-          url, destination_path, true, 500, false
-        )
-      end
-    end
-
-    context "when network errors occur" do
-      before do
-        allow(File).to receive(:exist?).with(destination_path).and_return(false)
-        allow(File).to receive(:size).with(destination_path).and_return(0)
-      end
-
-      it "повторяет попытку при Net::ReadTimeout" do
-        call_count = 0
-        allow(downloader).to receive(:perform_download) do
-          call_count += 1
-          raise Net::ReadTimeout if call_count <= 2
-
-          1000
-        end
-        stub_request(:get, url).to_return(status: 200, body: "content")
-
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "повторяет попытку при Net::OpenTimeout" do
-        call_count = 0
-        allow(downloader).to receive(:perform_download) do
-          call_count += 1
-          raise Net::OpenTimeout if call_count <= 2
-
-          1000
-        end
-
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "повторяет попытку при Errno::ECONNRESET" do
-        call_count = 0
-        allow(downloader).to receive(:perform_download) do
-          call_count += 1
-          raise Errno::ECONNRESET if call_count <= 2
-
-          1000
-        end
-
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "повторяет попытку при Errno::ETIMEDOUT" do
-        call_count = 0
-        allow(downloader).to receive(:perform_download) do
-          call_count += 1
-          raise Errno::ETIMEDOUT if call_count <= 2
-
-          1000
-        end
-
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "повторяет попытку при SocketError" do
-        call_count = 0
-        allow(downloader).to receive(:perform_download) do
-          call_count += 1
-          raise SocketError if call_count <= 2
-
-          1000
-        end
-
-        expect { downloader.send(:download_file, url, destination_path) }.not_to raise_error
-      end
-
-      it "выбрасывает ошибку после исчерпания попыток" do
-        stub_request(:get, url).to_timeout
-        allow(downloader).to receive(:perform_download).and_raise(Net::ReadTimeout)
-
-        expect { downloader.send(:download_file, url, destination_path) }.to raise_error(Net::ReadTimeout)
-      end
-
-      it "не повторяет попытку при не-сетевых ошибках" do
-        allow(downloader).to receive(:perform_download).and_raise(RuntimeError, "Непредвиденная ошибка")
-
-        expect { downloader.send(:download_file, url, destination_path) }.to raise_error(RuntimeError, "Непредвиденная ошибка")
-        expect(downloader).to have_received(:perform_download).once
-      end
-    end
-  end
-
-  # ============================================================================
-  # Методы очистки
-  # ============================================================================
 
   describe "#cleanup_old_files" do
-    let(:temp_dir) { Dir.mktmpdir }
+    let(:temp_dir) { File.join(dir, "cleanup") }
     let(:keep_days) { 30 }
     let(:keep_versions) { 2 }
 
-    before do
-      allow(Gar.configuration).to receive(:full_base_dir).and_return(temp_dir)
-      FileUtils.mkdir_p(temp_dir)
-    end
-
-    after do
-      FileUtils.rm_rf(temp_dir)
-    end
+    before { FileUtils.mkdir_p(temp_dir) }
 
     context "when directory does not exist" do
       it "возвращает пустой массив" do
@@ -515,74 +269,6 @@ RSpec.describe Gar::Downloader do
         expect(File.exist?(old_file)).to be true
         expect(File.exist?(very_old_file)).to be false
       end
-    end
-  end
-
-  # ============================================================================
-  # Вспомогательные методы (private) — форматирование и генерация имён файлов
-  # ============================================================================
-
-  describe "#format_bytes (private)" do
-    it "возвращает '0 B' для нуля байт" do
-      expect(downloader.send(:format_bytes, 0)).to eq("0 B")
-    end
-
-    it "форматирует байты корректно" do
-      expect(downloader.send(:format_bytes, 512)).to eq("512.0 B")
-    end
-
-    it "форматирует килобайты корректно" do
-      expect(downloader.send(:format_bytes, 2048)).to eq("2.0 KB")
-    end
-
-    it "форматирует мегабайты корректно" do
-      expect(downloader.send(:format_bytes, 2 * 1024 * 1024)).to eq("2.0 MB")
-    end
-
-    it "форматирует гигабайты корректно" do
-      expect(downloader.send(:format_bytes, 2 * 1024 * 1024 * 1024)).to eq("2.0 GB")
-    end
-
-    it "округляет значения корректно" do
-      expect(downloader.send(:format_bytes, 1536)).to eq("1.5 KB")
-    end
-  end
-
-  describe "#generate_filename (private)" do
-    it "генерирует имя файла с version_id" do
-      url = "http://example.com/file.zip"
-      filename = downloader.send(:generate_filename, url, 123)
-      expect(filename).to eq("file_v123.zip")
-    end
-
-    it "заменяет специальные символы на подчёркивания" do
-      url = "http://example.com/file-name@123.zip"
-      filename = downloader.send(:generate_filename, url, 123)
-      expect(filename).to eq("file-name_123_v123.zip")
-    end
-
-    it "не добавляет версию если URL без расширения .zip" do
-      url = "http://example.com/file"
-      filename = downloader.send(:generate_filename, url, 123)
-      expect(filename).to eq("file")
-    end
-  end
-
-  describe "#extract_version_from_filename (private)" do
-    it "извлекает версию из имени файла" do
-      expect(downloader.send(:extract_version_from_filename, "file_v123.zip")).to eq(123)
-    end
-
-    it "возвращает nil когда паттерн версии не найден" do
-      expect(downloader.send(:extract_version_from_filename, "file.zip")).to be_nil
-    end
-
-    it "обрабатывает полные пути" do
-      expect(downloader.send(:extract_version_from_filename, "/path/to/file_v456.zip")).to eq(456)
-    end
-
-    it "обрабатывает имена файлов с несколькими числами" do
-      expect(downloader.send(:extract_version_from_filename, "data_2023_v789.zip")).to eq(789)
     end
   end
 end
