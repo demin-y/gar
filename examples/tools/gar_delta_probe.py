@@ -2,19 +2,22 @@
 """Как устроена дельта ГАР: оглавление и примеры записей без скачивания архива целиком.
 
 Использование:
-  python3 gar_delta_probe.py [--insecure] [--regions 43 11] [--versions 2] [--source <URL или zip дельты>]
+  python3 gar_delta_probe.py [--insecure] [--regions 43 11] [--versions 2] [--source <URL или zip дельты> ...]
 
-Без --source берёт из API ФНС (GetAllDownloadFileInfo) последние --versions выгрузок с дельтой.
+Без --source берёт из API ФНС (GetAllDownloadFileInfo) последние --versions выгрузок с дельтой;
+если API недоступен — ищет дельты за последние три недели на файловом сервере
+fias-file.nalog.ru/downloads/<ГГГГ.ММ.ДД>/gar_delta_xml.zip.
 Для URL читает только оглавление zip и файлы выбранных субъектов (HTTP Range). Нужен только
 Python 3.8+, без сторонних библиотек. Отчёт печатается и сохраняется в gar_delta_probe.txt —
 этот файл и нужно прислать. --insecure отключает проверку сертификата (у ФНС сертификат
 российского УЦ).
 """
-import argparse, io, json, re, ssl, sys, zipfile, urllib.request
+import argparse, datetime, io, json, re, ssl, zipfile, urllib.error, urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 
 API = "https://fias.nalog.ru/WebServices/Public/GetAllDownloadFileInfo"
+FILES = "https://fias-file.nalog.ru/downloads/{date}/gar_delta_xml.zip"
 # Файлы субъекта, которые читает гем (минимальный набор), — по ним примеры записей
 TABLES = ["ADDR_OBJ", "HOUSES", "ADM_HIERARCHY", "MUN_HIERARCHY", "ADDR_OBJ_PARAMS", "HOUSES_PARAMS"]
 MAX_FILE = 64 << 20  # файлы субъекта больше этого (несжатые) не читаются целиком
@@ -23,7 +26,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--insecure", action="store_true")
 parser.add_argument("--regions", nargs="+", default=["43", "11"])
 parser.add_argument("--versions", type=int, default=2)
-parser.add_argument("--source")
+parser.add_argument("--source", nargs="+")
+parser.add_argument("--timeout", type=int, default=30)
 opts = parser.parse_args()
 CTX = ssl._create_unverified_context() if opts.insecure else None
 report = []
@@ -37,7 +41,7 @@ def out(*parts):
 
 def http(url, rng=None):
     headers = {"Range": f"bytes={rng}"} if rng else {}
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), context=CTX, timeout=120)
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), context=CTX, timeout=opts.timeout)
 
 
 class RangeFile(io.RawIOBase):
@@ -47,7 +51,7 @@ class RangeFile(io.RawIOBase):
         self.url, self.pos = url, 0
         with http(url, "0-0") as r:
             if r.status != 206:
-                sys.exit(f"Сервер не поддерживает Range (HTTP {r.status})")
+                raise OSError(f"сервер не поддерживает Range (HTTP {r.status})")
             self.size = int(r.headers["Content-Range"].rsplit("/", 1)[1])
 
     def readable(self): return True
@@ -153,8 +157,12 @@ def describe(zf, info, table):
 
 
 def versions():
-    with http(API) as r:
-        data = json.load(r)
+    try:
+        with http(API) as r:
+            data = json.load(r)
+    except (OSError, ValueError) as e:
+        out(f"API {API} недоступен ({e}): ищу дельты на файловом сервере")
+        return files_server()
     out("Ключи записи API:", sorted(data[0].keys()) if data else "пусто")
     data.sort(key=lambda v: v.get("VersionId", 0))
     out("Последние выгрузки (VersionId, Date, есть ли дельта):")
@@ -165,9 +173,36 @@ def versions():
     return [v["GarXMLDeltaURL"] for v in data if v.get("GarXMLDeltaURL")][-opts.versions:]
 
 
+def files_server():
+    """Дельты за последние 21 день по шаблону FILES (выгрузки — по вторникам и пятницам)"""
+    found = []
+    today = datetime.date.today()
+    for days in range(21):
+        url = FILES.format(date=(today - datetime.timedelta(days)).strftime("%Y.%m.%d"))
+        try:
+            with http(url, "0-0") as r:
+                out(f"  {url}: HTTP {r.status}, {r.headers.get('Content-Range')}")
+                found.append(url)
+        except urllib.error.HTTPError as e:
+            out(f"  {url}: HTTP {e.code}")
+        except OSError as e:
+            out(f"  {url}: {e} — файловый сервер недоступен")
+            break
+        if len(found) == opts.versions:
+            break
+    return sorted(found)
+
+
 try:
-    for source in ([opts.source] if opts.source else versions()):
-        probe(source)
+    sources = opts.source or versions()
+    if not sources:
+        out("Дельты не найдены. Скачайте gar_delta_xml.zip в браузере (fias.nalog.ru → Выгрузки)")
+        out("и запустите: python3 gar_delta_probe.py --source gar_delta_xml.zip")
+    for source in sources:
+        try:
+            probe(source)
+        except (OSError, zipfile.BadZipFile) as e:
+            out(f"Не удалось прочитать {source}: {e}")
 finally:
     with open("gar_delta_probe.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(report) + "\n")
