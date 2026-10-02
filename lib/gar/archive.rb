@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "date"
 require "zip"
 require "zlib"
 
@@ -132,12 +133,15 @@ module Gar
         end
     end
 
+    # Дата выгрузки (Date) — из той же версии
+    def version_date = Date.strptime(version_id.to_s, "%Y%m%d")
+
     # Работы импорта для таблиц (Schema::Table): справочники корня и таблицы субъектов —
     # всех или только region_codes. Крупные файлы первыми: так параллельный импорт не ждёт
     # в конце один большой файл.
     def jobs(tables, region_codes: nil)
       by_file = tables.to_h { [_1.file, _1] }
-      codes   = Array(region_codes).map(&:to_s)
+      codes   = Configuration.region_codes(region_codes)
       jobs    = entries.each_value.filter_map { |entry| job_for(entry, by_file, codes) }
       jobs.sort_by { -_1.size }
     end

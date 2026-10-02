@@ -6,8 +6,9 @@
 # - 11 Республика Коми → Сыктывкар → ул. Ленина, дом 10 (та же улица в другом субъекте);
 # - 77 Москва → ул. Тверская, дом 1;
 # - 80 — пустой субъект (все 18 файлов без записей).
-# Плюс параметры (индекс, ОКТМО, официальное наименование) и «шум» из таблиц,
-# которые гем не импортирует (участки, помещения, история изменений).
+# Плюс параметры (индекс, ОКТМО, официальное наименование; закрытые и истёкшие — для
+# фильтров) и «шум» из таблиц, которые минимальный набор не импортирует (участки, помещения,
+# история изменений), в том числе их строки в иерархиях.
 module GarSampleArchive
   module_function
 
@@ -83,7 +84,8 @@ module GarSampleArchive
     builder.region("43", :houses_params,
                    param(11, 4_300_101, 5, "610017"),
                    param(12, 4_300_101, 7, "33701000001"),
-                   param(13, 4_300_104, 5, "610017"))
+                   param(13, 4_300_104, 5, "610017"),
+                   param(14, 4_300_101, 6, "33401000000", "ENDDATE" => "2025-01-01")) # истёк до выгрузки
     add_noise(builder, "43")
   end
 
@@ -117,6 +119,14 @@ module GarSampleArchive
     builder.region(region, :apartments, { "ID" => 1, "OBJECTID" => 4_300_902, "OBJECTGUID" => guid(4_300_902), "CHANGEID" => 1,
                                           "NUMBER" => "1", "APARTTYPE" => 2, "OPERTYPEID" => 10, **DATES, **ACTUAL })
     builder.region(region, :steads_params, param(21, 4_300_901, 8, "43:40:000000:1"))
+    # Участок на улице Ленина и квартира в доме 10: строки в обеих иерархиях
+    parents = { 4_300_901 => "4300010", 4_300_902 => "4300010.4300101" }
+    { adm_hierarchy: "4300001.4300003", mun_hierarchy: "4300001.4300002.4300003" }.each do |table, city|
+      builder.region(region, table, *parents.map do |object_id, ancestors|
+        { "ID" => object_id, "OBJECTID" => object_id, "PARENTOBJID" => ancestors.split(".").last, "CHANGEID" => object_id,
+          "REGIONCODE" => region, **DATES, "ISACTIVE" => "1", "PATH" => "#{city}.#{ancestors}.#{object_id}" }
+      end)
+    end
     builder.region(region, :change_history, { "CHANGEID" => 1, "OBJECTID" => 4_300_010, "ADROBJECTID" => guid(1),
                                               "OPERTYPEID" => 10, "CHANGEDATE" => "2024-01-01" })
   end

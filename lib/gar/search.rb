@@ -8,7 +8,9 @@ module Gar
   # база или statement_timeout — Gar::UnavailableError. Если загружен ActiveSupport, каждый
   # вызов публикует событие search.gar (метод, запрос, число результатов).
   #
-  # path_type — иерархия: :adm (административная) или :mun (муниципальная).
+  # path_type — иерархия: :adm (административная) или :mun (муниципальная). Если её нет в
+  # схеме (импорт с config.hierarchies без неё), поиск по ней бросает ConfigurationError, а не
+  # отвечает пустым списком.
   class Search
     UUID = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
     # Регионы, затем районы, города, населённые пункты и улицы
@@ -33,7 +35,7 @@ module Gar
       # Совпадения по пути ищутся, только если по названию не набралось limit + offset:
       # условие на named — однократный фильтр, скан путей тогда не выполняется
       instrument(:search_address_objects, query:) do
-        select(AddressObject, <<~SQL, text, limit, offset)
+        select(AddressObject, <<~SQL, text, limit, offset, hierarchy: path_type)
           WITH q AS (SELECT #{function}('russian', $1) AS q),
           named AS (
             SELECT #{ADDRESS_OBJECT_COLUMNS}, 0 AS phase, ts_rank_cd(#{name}, q.q) AS rank
@@ -64,7 +66,7 @@ module Gar
 
       path = path_column(path_type)
       instrument(:search_houses, query:) do
-        select(House, <<~SQL, text, limit, offset)
+        select(House, <<~SQL, text, limit, offset, hierarchy: path_type)
           SELECT #{HOUSE_COLUMNS}
           FROM #{table(:houses)} h
           CROSS JOIN #{function}('russian', $1) q
@@ -91,7 +93,7 @@ module Gar
             LIMIT $2 OFFSET $3
           SQL
         else
-          select(AddressObject, <<~SQL, parent_guid, levels, limit, offset)
+          select(AddressObject, <<~SQL, parent_guid, levels, limit, offset, hierarchy: path_type)
             SELECT #{ADDRESS_OBJECT_COLUMNS}
             FROM #{children(path_type)}
             JOIN #{table(:address_objects)} ao ON ao.object_id = h.object_id AND ao.is_active
@@ -108,7 +110,7 @@ module Gar
       return [] unless parent_guid.to_s.match?(UUID)
 
       instrument(:find_houses, parent_guid:) do
-        select(House, <<~SQL, parent_guid, limit, offset)
+        select(House, <<~SQL, parent_guid, limit, offset, hierarchy: path_type)
           SELECT #{HOUSE_COLUMNS}
           FROM #{children(path_type, as: 'hier')}
           JOIN #{table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
@@ -150,8 +152,22 @@ module Gar
 
     private
 
-    def select(result_class, sql, *params)
-      Database.with_connection(db_conn) { |conn| conn.exec_params(sql, params).map { result_class.from_row(_1) } }
+    # hierarchy — иерархия запроса: пустой ответ или ошибка «нет таблицы» проверяются на то, что
+    # её не загружали. Удачный запрос лишнего обращения к базе не делает
+    def select(result_class, sql, *params, hierarchy: nil)
+      rows = Database.with_connection(db_conn) { |conn| conn.exec_params(sql, params).map { result_class.from_row(_1) } }
+      require_hierarchy(hierarchy) if hierarchy && rows.empty?
+      rows
+    rescue PG::UndefinedTable
+      require_hierarchy(hierarchy) if hierarchy
+      raise
+    end
+
+    def require_hierarchy(path_type)
+      name = table(Configuration::HIERARCHY_TABLES.fetch(path_type))
+      return if Database.with_connection(db_conn) { Database.relation_exists?(_1, name) }
+
+      raise ConfigurationError, "Иерархия #{path_type} не загружена: в схеме #{schema} нет таблицы #{name}"
     end
 
     # Действующие строки иерархии (алиас as) — прямые потомки действующего объекта с GUID $1

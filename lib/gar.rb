@@ -11,6 +11,7 @@ module Gar
   autoload :Archive,         "gar/archive"
   autoload :Configuration,   "gar/configuration"
   autoload :Loggable,        "gar/loggable"
+  autoload :Meta,            "gar/meta"
   autoload :Database,        "gar/database"
   autoload :Downloader,      "gar/downloader"
   autoload :Importer,        "gar/importer"
