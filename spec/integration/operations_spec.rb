@@ -10,10 +10,6 @@ RSpec.describe "Загрузка из приложения", :db do
 
   before { Gar.configuration.database_schema = current }
 
-  def load_current(**)
-    Gar.switch(Gar.import(zip_path, **).tap { Gar.build_paths(_1) })
-  end
-
   it "проходит шаги по отдельности с прогрессом и делает схему текущей" do
     calls = []
     progress = ->(done, total, stage) { calls << [stage, done, total] }
@@ -90,6 +86,11 @@ RSpec.describe "Загрузка из приложения", :db do
       load_current
       load_current(region_codes: ["43"]) # прежняя текущая — резервная
       stale = Gar.import(zip_path)       # загружена, но не новее текущей
+
+      status = Gar.status
+      expect(status.current).to have_attributes(name: current, meta: have_attributes(region_codes: ["43"]), size: be_positive)
+      expect(status.backups.map(&:name)).to eq(["#{current}_backup_v20260116", "#{current}_backup_old"])
+      expect(status.imports).to contain_exactly(have_attributes(name: stale, meta: have_attributes(status: "imported")))
 
       dropped = Gar.cleanup_schemas(keep_backups: 1)
 

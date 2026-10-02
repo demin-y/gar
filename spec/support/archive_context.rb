@@ -10,4 +10,7 @@ RSpec.shared_context "с синтетическим архивом" do
   let(:zip_path)        { archive_builder.write(archive_dir) }
 
   after { FileUtils.rm_rf(archive_dir) }
+
+  # Текущая схема (config.database_schema) из синтетического архива: импорт, пути, переключение
+  def load_current(**) = Gar.switch(Gar.import(zip_path, **).tap { Gar.build_paths(_1) })
 end

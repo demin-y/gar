@@ -14,6 +14,7 @@ group :development do
 end
 
 group :test do
+  gem "railties",  ">= 7.1", require: false
   gem "rspec",     "~> 3.12"
   gem "simplecov", ">= 0.22", require: false
   gem "webmock",   "~> 3.18"

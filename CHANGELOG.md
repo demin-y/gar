@@ -5,6 +5,28 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Rails и документация (этап 10)
+
+**Новое**
+- `Gar::Railtie` (загружается, если определён `Rails::Railtie`): rake-задачи `gar:download[version_id]`,
+  `gar:import[43,11]`, `gar:build_paths[схема]`, `gar:switch[схема]`, `gar:update`, `gar:status`,
+  `gar:cleanup`. Задачи печатают итог и прогресс; `gar:update` при `LockedError` сообщает и выходит
+  без ошибки. Без Rails — `load "gar/tasks/gar.rake"`; команды задач — `Gar::Tasks`.
+- Генератор `rails g gar:install` → `config/initializers/gar.rb` со всеми настройками в комментариях.
+- `Gar.status(updates: 5)` → `Gar::Status(current:, updates:, backups:, imports:)` — схемы
+  (`Gar::SchemaInfo`: имя, `gar_meta`, место на диске) и последние дельты; хватает права `SELECT`.
+- `Gar::Delta.history(conn, schema, limit:)` → `[Gar::DeltaUpdate]` — журнал применённых дельт;
+  `Gar::Schemas.imports`, `Gar::Schemas.sizes`.
+- Версия гема — 2.0.0.
+
+**Документация**
+- README заново: таблица объёмов (архив, распаковка, XML, дельта, база) для страны и двух
+  субъектов вместо «150 ГБ» и «30–50 ГБ»; раздел «Rails»; пользователи базы — импортёр и
+  читатель с `ALTER DEFAULT PRIVILEGES` (проверено спекой); требования Ruby 3.3+, PostgreSQL 16+.
+- `docs/real_data_checklist.md` — прогон на реальной выгрузке; `examples/README.md` по
+  существующим скриптам; исправлены `4_switch_to_imported_schema.rb` и `fix_ssl.rb`
+  (несуществующие методы).
+
 ### Дельты (этап 9)
 
 **Несовместимые изменения**

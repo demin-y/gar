@@ -18,7 +18,7 @@ unless schema
   zip_path = Gar::Importer.find_latest_full_base_zip
   abort "ZIP файлы не найдены в #{Gar.configuration.full_base_dir}" unless zip_path
 
-  schema = "gar_v#{Gar::Archive.new(zip_path).version_id}"
+  schema = Gar::Schemas.import_name(Gar.configuration.database_schema, Gar::Archive.new(zip_path).version_id)
 end
 
 puts "Построение путей в схеме #{schema}"

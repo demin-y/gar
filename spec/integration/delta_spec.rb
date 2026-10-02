@@ -13,10 +13,6 @@ RSpec.describe "Дельты", :db do
 
   before { Gar.configuration.database_schema = current }
 
-  def load_current
-    Gar.switch(Gar.import(zip_path, region_codes: ["43", "11"]).tap { Gar.build_paths(_1) })
-  end
-
   # Архив дельты: блок заполняет GarArchiveBuilder
   def delta(version = "2026.01.20")
     builder = GarArchiveBuilder.new(version:)
@@ -51,7 +47,7 @@ RSpec.describe "Дельты", :db do
   def count(table, condition = "true") = value("SELECT count(*) FROM #{current}.#{table} WHERE #{condition}").to_i
 
   describe Gar::Delta do
-    before { load_current }
+    before { load_current(region_codes: ["43", "11"]) }
 
     it "переименование улицы пересобирает пути её домов, закрытые записи и параметры удаляет" do
       zip =
@@ -71,7 +67,8 @@ RSpec.describe "Дельты", :db do
       expect(count(:addr_obj_params, "id = 2")).to eq(0)
       expect(Gar.autocomplete("Свободы 10").map(&:address)).to include("Кировская обл, Киров г, Свободы ул, д. 10")
       expect(Gar.current_version).to have_attributes(version_id: 20_260_120, version_date: Date.new(2026, 1, 20), status: "ready")
-      expect(db_connection.exec("SELECT version_id, upserted, deleted FROM #{current}.gar_updates").values).to eq([["20260120", "1", "2"]])
+      expect(described_class.history(db_connection, current))
+        .to match([have_attributes(version_id: 20_260_120, version_date: Date.new(2026, 1, 20), upserted: 1, deleted: 2)])
     end
 
     it "новый дом получает путь и учитывается в числе домов улицы и города" do
@@ -167,7 +164,7 @@ RSpec.describe "Дельты", :db do
 
       expect(value("SELECT name FROM #{current}.address_objects WHERE id = 4300010")).to eq("Ленина")
       expect(Gar.current_version.version_id).to eq(20_260_116)
-      expect(Gar::Database.relation_exists?(db_connection, "#{current}.gar_updates")).to be(false)
+      expect(described_class.history(db_connection, current)).to eq([])
     end
 
     it "к схеме без путей применяет только записи: пути построит Gar.build_paths" do
@@ -189,8 +186,7 @@ RSpec.describe "Дельты", :db do
   end
 
   describe "Gar.update!" do
-    let(:api)       { "https://fias.nalog.ru/WebServices/Public" }
-    let(:downloads) { "https://fias-file.nalog.ru/downloads" }
+    include FiasApi
 
     before do
       WebMock.disable_net_connect!
@@ -202,24 +198,11 @@ RSpec.describe "Дельты", :db do
 
     after { WebMock.allow_net_connect! }
 
-    # Выгрузки в API ФНС: VersionId → { delta:, full: } — архивы, которые отдаёт сервер
-    def versions(list)
-      infos = list.map { |id, files| { "VersionId" => id, "GarXMLDeltaURL" => url(id, :delta, files), "GarXMLFullURL" => url(id, :full, files) } }
-      stub_request(:get, "#{api}/GetAllDownloadFileInfo").to_return(body: infos.to_json)
-    end
-
-    # Ссылка на архив kind выгрузки id ("" — архива нет); сервер отдаёт files[kind]
-    def url(id, kind, files)
-      return "" unless files[kind]
-
-      "#{downloads}/#{id}/gar_#{kind}_xml.zip".tap { stub_request(:get, _1).to_return(body: File.binread(files[kind])) }
-    end
-
     it "применяет цепочку дельт по порядку, а на последней версии ничего не делает" do
-      load_current
+      load_current(region_codes: ["43", "11"])
       second = delta("2026.01.23") { _1.region("43", :addr_obj, street(4_300_010, "Свободы", { "ID" => 9_400_010 })) }
       first  = delta { _1.region("43", :addr_obj, street(4_300_010, "Ленина", { **sample::CLOSED, "NEXTID" => 9_400_010 })) }
-      versions(20_260_116 => {}, 20_260_123 => { delta: second }, 20_260_120 => { delta: first })
+      stub_fias_versions(20_260_116 => {}, 20_260_123 => { delta: second }, 20_260_120 => { delta: first })
       stages = []
 
       result = Gar.update!(on_progress: ->(_done, _total, stage) { stages << stage })
@@ -231,7 +214,7 @@ RSpec.describe "Дельты", :db do
     end
 
     it "без базы загружает последнюю выгрузку полным импортом" do
-      versions(20_260_116 => { full: zip_path })
+      stub_fias_versions(20_260_116 => { full: zip_path })
 
       expect(Gar.update!).to have_attributes(kind: :full, from_version: nil, to_version: 20_260_116)
       expect(Gar.current_version).to have_attributes(status: "ready", region_codes: [])
@@ -239,16 +222,16 @@ RSpec.describe "Дельты", :db do
     end
 
     it "при разрыве цепочки или слишком длинной цепочке переходит на полный импорт" do
-      load_current
+      load_current(region_codes: ["43", "11"])
       full = GarSampleArchive.build(version: "2026.01.20").write(archive_dir, name: "gar_xml_v20260120.zip")
-      versions(20_260_110 => {}, 20_260_120 => { delta: delta, full: })
+      stub_fias_versions(20_260_110 => {}, 20_260_120 => { delta: delta, full: })
 
       expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_120)
       expect(Gar::Schemas.backups(db_connection, current)).to eq(["#{current}_backup_v20260116"])
 
       Gar.configuration.max_delta_chain = 0
       newer = GarSampleArchive.build(version: "2026.01.23").write(archive_dir, name: "gar_xml_v20260123.zip")
-      versions(20_260_120 => {}, 20_260_123 => { delta: delta("2026.01.23"), full: newer })
+      stub_fias_versions(20_260_120 => {}, 20_260_123 => { delta: delta("2026.01.23"), full: newer })
       expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_120, to_version: 20_260_123)
       expect(Gar.current_version.version_id).to eq(20_260_123)
     end

@@ -70,6 +70,26 @@ module Gar
       include Serializable
     end
 
+  # Применённая дельта из журнала gar_updates схемы (Gar::Delta.history): версия и дата
+  # выгрузки, время применения, сколько записей добавлено или изменено и удалено
+  DeltaUpdate =
+    Data.define(:version_id, :version_date, :applied_at, :upserted, :deleted, :gem_version) do
+      include Serializable
+    end
+
+  # Схема ГАР в базе (Gar.status): имя, сведения gar_meta (nil — схема без неё), место на диске в байтах
+  SchemaInfo =
+    Data.define(:name, :meta, :size) do
+      include Serializable
+    end
+
+  # Состояние базы (Gar.status): текущая схема (nil — её нет), последние дельты текущей схемы,
+  # резервные схемы (новые первыми) и схемы импорта — Gar::SchemaInfo
+  Status =
+    Data.define(:current, :updates, :backups, :imports) do
+      include Serializable
+    end
+
   # Разобранный адрес (Gar.address). Части — полные наименования элементов пути («Кировская
   # область», «город Киров», «улица Ленина»); house — номер с литерой или дробью, building и
   # structure — номера корпуса и строения. parent_guids — GUID элементов пути от субъекта до

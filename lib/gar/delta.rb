@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 module Gar
   # Дельта ГАР — изменения выгрузки относительно предыдущей версии: архив той же структуры, что
   # и полный (version.txt, справочники в корне, папки субъектов), только с изменёнными записями.
@@ -27,6 +29,21 @@ module Gar
     }.freeze
 
     attr_reader :db_conn, :schema
+
+    # Последние применённые к схеме дельты из журнала gar_updates — Gar::DeltaUpdate, новые
+    # первыми; [] — дельт не было
+    def self.history(conn, schema, limit: 10)
+      updates = updates_table(schema)
+      return [] unless Database.relation_exists?(conn, updates)
+
+      sql = "SELECT row_to_json(u) FROM (SELECT * FROM #{updates} ORDER BY version_id DESC LIMIT $1) u"
+      conn.exec_params(sql, [limit]).column_values(0).map do |json|
+        row = JSON.parse(json, symbolize_names: true)
+        DeltaUpdate.new(**row, version_date: Date.iso8601(row[:version_date]), applied_at: Time.iso8601(row[:applied_at]))
+      end
+    end
+
+    def self.updates_table(schema) = "#{Schema.quote(schema)}.#{Schema.quote(UPDATES)}"
 
     def initialize(db_conn = nil, schema: Gar.configuration.database_schema)
       @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
@@ -201,7 +218,7 @@ module Gar
     end
 
     def journal(archive, counts)
-      updates = "#{quote(schema)}.#{quote(UPDATES)}"
+      updates = self.class.updates_table(schema)
       db_conn.exec(<<~SQL)
         CREATE TABLE IF NOT EXISTS #{updates} (
           version_id integer PRIMARY KEY, version_date date NOT NULL, applied_at timestamptz NOT NULL DEFAULT now(),

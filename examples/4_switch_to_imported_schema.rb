@@ -1,40 +1,20 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Example: Switch to imported GAR database schema
+# Переключение на загруженную схему (Gar.switch): она становится текущей (config.database_schema),
+# прежняя текущая — резервной, лишние резервные удаляются. Переключить можно только готовую
+# схему — после 3_populate_full_paths.rb. То же в Rails — rake "gar:switch[gar_v20260116]".
+#
+#   ./examples/4_switch_to_imported_schema.rb gar_v20260116   # имя схемы печатает 2_import_full_base.rb
 
 require "gar"
 
-puts "Переключение на импортированную базу данных GAR"
-puts "=" * 50
+schema = ARGV[0] or abort "Укажите схему: #{$PROGRAM_NAME} gar_v<версия> (её имя печатает 2_import_full_base.rb)"
 
 begin
-  # Создаём импортёр данных GAR
-  importer = Gar::Importer.new
-
-  # Находим последний скачанный ZIP файл для определения версии
-  puts "Поиск последнего скачанного ZIP файла..."
-  zip_path = Gar::Importer.find_latest_full_base_zip
-
-  if zip_path.nil?
-    puts "⚠️  ZIP файлы не найдены в #{Gar.configuration.full_base_dir}"
-    exit 1
-  end
-
-  version     = importer.extract_version_from_archive(zip_path)
-  schema_name = "gar_v#{version}"
-
-  puts "✓ Найден ZIP файл: #{File.basename(zip_path)}"
-  puts "  Версия: #{version}"
-  puts "  Схема БД: #{schema_name}"
-
-  puts "Переключение на схему #{schema_name}..."
-  importer.switch_to_imported_schema(schema_name)
-rescue StandardError => e
-  puts "Ошибка: #{e.message}"
-  puts ""
-  puts "Возможные причины:"
-  puts "  - Схема #{schema_name} не существует"
-  puts "  - Недостаточно прав на переименование схем"
-  puts "  - PostgreSQL сервер недоступен"
+  Gar.switch(schema)
+  puts "Схема #{schema} стала текущей (#{Gar.configuration.database_schema})"
+  puts "Версия: #{Gar.current_version.version_id}"
+rescue Gar::Error => e
+  abort "Ошибка: #{e.message}"
 end

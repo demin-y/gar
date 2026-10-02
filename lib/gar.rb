@@ -21,15 +21,19 @@ module Gar
   autoload :Meta,            "gar/meta"
   autoload :Database,        "gar/database"
   autoload :Delta,           "gar/delta"
+  autoload :DeltaUpdate,     "gar/results"
   autoload :Downloader,      "gar/downloader"
   autoload :Importer,        "gar/importer"
   autoload :PathBuilder,     "gar/path_builder"
   autoload :Schema,          "gar/schema"
+  autoload :SchemaInfo,      "gar/results"
   autoload :Schemas,         "gar/schemas"
   autoload :Search,          "gar/search"
   autoload :Serializable,    "gar/results"
+  autoload :Status,          "gar/results"
   autoload :Suggestion,      "gar/results"
   autoload :Synonyms,        "gar/synonyms"
+  autoload :Tasks,           "gar/tasks"
   autoload :UpdateResult,    "gar/results"
   autoload :TestSupport,     "gar/test_support"
   autoload :Utils,           "gar/utils"
@@ -97,3 +101,5 @@ module Gar
     end
   end
 end
+
+require_relative "gar/railtie" if defined?(Rails::Railtie)
