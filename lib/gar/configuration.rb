@@ -29,7 +29,7 @@ module Gar
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
                   :search_statement_timeout, :prune_hierarchy, :builtin_synonyms
-    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups
+    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups, :max_delta_chain
 
     def initialize
       # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
@@ -51,6 +51,8 @@ module Gar
       @prune_hierarchy             = true
       # Сколько прежних текущих схем хранить после переключения (каждая — гигабайты на диске)
       @keep_backups                = 1
+      # Gar.update!: больше дельт подряд — полный импорт вместо цепочки
+      @max_delta_chain             = 30
       @logger                      = nil
       @parallel_import             = true
       @parallel_import_workers     = [Etc.nprocessors, 4].min
@@ -92,10 +94,11 @@ module Gar
     end
 
     def keep_backups=(count)
-      count = Integer(count, exception: false)
-      raise ConfigurationError, "keep_backups — число резервных схем, 0 или больше" unless count&.>=(0)
+      @keep_backups = non_negative(count, "keep_backups — число резервных схем, 0 или больше")
+    end
 
-      @keep_backups = count
+    def max_delta_chain=(count)
+      @max_delta_chain = non_negative(count, "max_delta_chain — наибольшее число дельт подряд, 0 или больше")
     end
 
     # Иерархия поиска и адреса, если её не передали: :adm или :mun
@@ -170,6 +173,14 @@ module Gar
     private
 
     def from_preset(key) = PRESETS.fetch(preset)[key]
+
+    # Число 0 или больше; иначе — ConfigurationError с сообщением message
+    def non_negative(value, message)
+      value = Integer(value, exception: false)
+      raise ConfigurationError, message unless value&.>=(0)
+
+      value
+    end
 
     def param_type(value)
       Integer(value, exception: false) or raise ConfigurationError, "Тип параметра — число: #{value.inspect}"

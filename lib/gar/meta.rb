@@ -75,6 +75,12 @@ module Gar
           param_types: param_types&.sort, keep_history: keep_history.sort, prune_hierarchy: }
       end
 
+      # Отмечает, что схема обновлена дельтой до версии архива (Archive)
+      def advance(conn, schema, archive)
+        conn.exec_params("UPDATE #{qualified(schema)} SET version_id = $1, version_date = $2",
+                         [archive.version_id, archive.version_date.iso8601])
+      end
+
       # Переводит схему в статус imported или ready и отмечает время стадии; схему без gar_meta
       # не трогает
       def update(conn, schema, status)

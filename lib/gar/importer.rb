@@ -34,7 +34,7 @@ module Gar
     # заблокирована для других изменяющих операций (LockedError). Ошибки базы и файлов —
     # ImportError.
     def import_full_base(source, schema: nil, region_codes: nil, on_progress: nil, parallel: Gar.configuration.parallel_import, reuse_current: false)
-      archive      = open_archive(source)
+      archive      = Archive.open(source)
       @parallel    = parallel
       current      = Gar.configuration.database_schema
       schema     ||= Schemas.import_name(current, archive.version_id)
@@ -245,8 +245,6 @@ module Gar
     ensure
       conn&.close
     end
-
-    def open_archive(source) = source.is_a?(Archive) ? source : Archive.new(source)
 
     def warn_missing_regions(jobs, region_codes)
       missing = region_codes - jobs.filter_map(&:region_code)
