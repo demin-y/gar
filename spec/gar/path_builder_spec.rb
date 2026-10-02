@@ -51,6 +51,21 @@ RSpec.describe Gar::PathBuilder, :db do
     expect(paths(:houses, "full_mun_path")[10]).to eq("Кировская обл, город Киров г.о., Киров г, Ленина ул, д. 10")
   end
 
+  it "считает дома в поддереве по обеим иерархиям и отмечает административные центры" do
+    db_connection.exec(Gar::Schema.fetch(:addr_obj_params).create_sql(schema))
+    insert(:addr_obj_params, [:id, :object_id, :type_id, :value], [1, 2, 22, "1"], [2, 3, 5, "610000"])
+
+    builder.build
+
+    expect(paths(:address_objects, "house_count")).to include(1 => "3", 2 => "3", 3 => "3", 4 => "1")
+    expect(paths(:address_objects, "is_capital")).to include(1 => nil, 2 => "t", 3 => nil)
+
+    db_connection.exec("UPDATE #{schema}.houses SET is_active = false WHERE id <> 10; DELETE FROM #{schema}.addr_obj_params")
+    builder.build
+    expect(paths(:address_objects, "house_count")).to include(1 => "1", 4 => "1")
+    expect(paths(:address_objects, "is_capital")[2]).to be_nil
+  end
+
   it "заполняет tsvector путей и строит полнотекстовые индексы" do
     builder.build
 

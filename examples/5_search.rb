@@ -37,8 +37,8 @@ results.each do |result|
 end
 
 # 3. Поиск по муниципальной иерархии
-puts "\n4. Поиск по муниципальной иерархии (path_type: :mun):"
-results = search.search_address_objects("Тверь", path_type: :mun, limit: 3)
+puts "\n4. Поиск по муниципальной иерархии (hierarchy: :mun):"
+results = search.search_address_objects("Тверь", hierarchy: :mun, limit: 3)
 results.each do |result|
   puts "  - #{result.full_mun_path}"
 end

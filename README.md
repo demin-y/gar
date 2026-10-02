@@ -295,45 +295,105 @@ builder.invalidate([street_object_id]) # улица и все её дома
 builder.build
 ```
 
-**Примечание:** Процесс построения путей может занять несколько часов на полной базе. Каскадный поиск (`find_address_objects`, `find_houses`) работает без построения путей.
+**Примечание:** Процесс построения путей может занять несколько часов на полной базе. Каскадный поиск (`find_address_objects`, `find_houses`) и `Gar.address` работают без построения путей; `within:` и полнотекстовый поиск — только после него. В конце построения пересчитываются число домов в поддереве и признак административного центра адресных объектов (для ранжирования).
 
 ### 4. Поиск адресов (Search)
+
+**Автодополнение одной строки ввода** (поле формы с Tom Select и т. п.):
+
+```ruby
+Gar.autocomplete("Киров, Ленина 10б", region_codes: %w[43 11], limit: 10)
+# => [#<data Gar::Suggestion kind=:house, object_guid="…", gar_object_id=…, level=10, region_code="43",
+#       name="д. 10б", address="Кировская обл, Киров г, Ленина ул, д. 10б">,
+#     …, #<data Gar::Suggestion kind=:address_object, name="Ленина ул", …>]
+Gar.autocomplete("Ленина 12 к2", within: kirov_guid) # только в поддереве города
+```
+
+Строка делится на текст и номер дома (`Gar::HouseNumber`: «10», «10а», «10/2», «12 к2»,
+«14 корп. 1 стр. 3»). Без номера — адресные объекты по тексту, последнее слово — префикс.
+С номером — дома на подходящих улицах: сначала точный номер (без корпуса и строения, если
+их не ввели), затем номера, которые начинаются с введённого, после них — сами улицы. Шесть
+цифр — почтовый индекс. Элементы — `Data` с `to_h`/`as_json`/`to_json`: их можно отдать в
+JSON как есть.
+
+**Адрес по GUID** — разобранные поля и строка по правилам ФНС
+(`docs/Правила_формирования_адресной_строки.docx`):
+
+```ruby
+address = Gar.address(house_guid, hierarchy: :mun)
+address.full_address  # => "Московская область, городской округ Павлово-Посадский, город Павловский Посад, улица Тихонова, дом 93"
+address.short_address # => "Московская область, г.о. Павлово-Посадский, г Павловский Посад, ул Тихонова, д. 93"
+address.to_h
+# => { object_guid:, gar_object_id:, level:, hierarchy:, region_code: "50", region: "Московская область",
+#      district: "городской округ Павлово-Посадский", city: "город Павловский Посад", street: "улица Тихонова",
+#      house: "93", building: nil, structure: nil, postal_code:, okato:, oktmo:, parent_guids: [...], … }
+```
+
+Полное наименование элемента — тип и название («улица Ленина», тип из справочника по
+краткому имени и уровню); у субъекта, муниципального района и поселения — действующее
+официальное наименование. Индекс, ОКАТО и ОКТМО — параметры объекта, индекс при его
+отсутствии — у ближайшего предка (улицы). `nil` — нет действующего объекта с таким GUID.
+
+**Методы `Gar::Search`:**
 
 ```ruby
 search = Gar::Search.new
 
-# Полнотекстовый поиск
-results = search.search_address_objects("Москва Тверская", limit: 10)
-results.each do |result|
-  puts "#{result.full_adm_path} (уровень #{result.level})"
-end
+search.search_address_objects("просп. Октябрьский", region_codes: ["43"], limit: 10)
+search.search_address_objects("Кир", autocomplete: true)  # последнее слово — префикс
+search.search_address_objects("610000")                   # почтовый индекс
+search.search_houses("Ленина 10", within: city_guid)
 
-# Поиск с автодополнением
-results = search.search_address_objects("Моск", autocomplete: true, limit: 5)
+regions = search.find_address_objects(level: 1)
+cities  = search.find_address_objects(parent_guid: region_guid, level: [5, 6])
+streets = search.find_address_objects(level: 8, within: city_guid)
+houses  = search.find_houses(street_guid, limit: 50)
 
-# Каскадный поиск по уровням
-regions = search.find_address_objects(level: 1, limit: 10)
-cities = search.find_address_objects(parent_guid: region_guid, level: [5, 6])
-streets = search.find_address_objects(parent_guid: city_guid, level: 8)
-
-# Поиск домов
-houses = search.find_houses(street_guid, limit: 50)
-
-# Полнотекстовый поиск домов
-house_results = search.search_houses("д. 10", limit: 10)
-
-# Поиск по GUID
-address = search.find_address_object_by_guid("550e8400-e29b-41d4-a716-446655440000")
-house = search.find_house_by_guid("650e8400-e29b-41d4-a716-446655440000")
+search.find_address_object_by_guid(guid)
+search.find_house_by_guid(guid)
 ```
 
-Результаты — `Gar::AddressObject` и `Gar::House` (`Data`): `id`, `gar_object_id` (OBJECTID ГАР),
-`object_guid`, название или номер и тип, `full_adm_path`, `full_mun_path`; у адресного
-объекта ещё `level`. Схема — `config.database_schema` или `Gar::Search.new(schema: …)`.
+Результаты — `Gar::AddressObject` и `Gar::House` (`Data`): `id`, `gar_object_id` (OBJECTID
+ГАР), `object_guid`, название или номер и тип, `region_code`, `full_adm_path`, `full_mun_path`;
+у адресного объекта ещё `level`. Схема — `config.database_schema` или
+`Gar::Search.new(schema: …)`.
 
-Иерархию задаёт `path_type: :adm` (по умолчанию) или `:mun`. Если иерархия не загружена в
-схему (`config.hierarchies` при импорте), поиск по ней бросает `Gar::ConfigurationError`, а не
-отвечает пустым списком.
+Общие параметры всех методов поиска и `Gar.autocomplete`:
+- `hierarchy:` — `:adm` или `:mun`, по умолчанию `config.default_hierarchy` (`:adm`). Если
+  иерархия не загружена в схему (`config.hierarchies` при импорте), поиск по ней бросает
+  `Gar::ConfigurationError`, а не отвечает пустым списком;
+- `region_codes:` — только объекты этих субъектов (`%w[43 11]`);
+- `within:` — GUID субъекта, района или города: только его поддерево по иерархии запроса.
+
+**Текстовый запрос.** Регистр, `ё`, точки и знаки препинания не важны. Каждое слово ищется
+вместе с синонимами (`Gar::Synonyms`), поэтому «просп. Октябрьский» находит «Октябрьский
+пр-кт», а «Б. Садовая» — «Большая Садовая ул». Источники синонимов:
+- справочники типов ГАР в схеме: «ул» ↔ «улица», «к.» ↔ «корпус»;
+- встроенный словарь `lib/gar/data/synonyms.yml`: «просп», «мкрн», «б» → «большая»/«бульвар»,
+  «им» → «имени» и др.; отключается `config.builtin_synonyms = false`;
+- свои группы приложения — работают без перестроения индексов:
+
+```ruby
+Gar.configure { |config| config.synonyms = { "проспект" => %w[прсп], "имени" => %w[им.] } }
+```
+
+Порядок результатов: точное совпадение названия, административный центр (параметры 22/23),
+число домов в поддереве (считает `PathBuilder`) — «Кир» выдаёт г. Киров раньше «Кировской
+обл.» и посёлка «Кировский».
+
+**Скорость.** Замер `examples/benchmarks/import_and_search.rb` на синтетике
+(`generate_archive.rb`): 2 субъекта по 300 000 домов, PostgreSQL 16, 200 запросов каждого вида.
+
+| Запрос | p50 | p95 |
+|---|---:|---:|
+| `Gar.autocomplete`: начало названия улицы | 3,3 мс | 11,4 мс |
+| `Gar.autocomplete`: улица и номер дома | 5,3 мс | 7,2 мс |
+| `Gar.autocomplete`: улица и номер в границах города | 3,0 мс | 3,9 мс |
+| `Gar.address` по GUID дома | 1,7 мс | 2,2 мс |
+| `search_address_objects`, автодополнение | 6,5 мс | 17,1 мс |
+| `search_houses` «улица номер» | 7,1 мс | 13,7 мс |
+
+Импорт архива — 10 с, построение путей с подсчётом рангов — 77 с.
 
 ### 5. Тестовые данные для спек приложения (TestSupport)
 

@@ -26,6 +26,11 @@ Layout/HashAlignment:
 Metrics/AbcSize:
   Enabled: false
 
+# Именованные параметры поиска (hierarchy:, region_codes:, within:, limit:, …) — часть
+# публичного API; ограничение — для позиционных
+Metrics/ParameterLists:
+  CountKeywordArgs: false
+
 Metrics/BlockLength:
   Enabled: true
   CountComments: false

@@ -6,8 +6,12 @@ require_relative "gar/version"
 require_relative "gar/errors"
 
 module Gar
+  autoload :Address,         "gar/results"
+  autoload :AddressBuilder,  "gar/address_builder"
   autoload :AddressObject,   "gar/results"
+  autoload :Autocomplete,    "gar/autocomplete"
   autoload :House,           "gar/results"
+  autoload :HouseNumber,     "gar/house_number"
   autoload :Archive,         "gar/archive"
   autoload :Configuration,   "gar/configuration"
   autoload :Loggable,        "gar/loggable"
@@ -18,6 +22,9 @@ module Gar
   autoload :PathBuilder,     "gar/path_builder"
   autoload :Schema,          "gar/schema"
   autoload :Search,          "gar/search"
+  autoload :Serializable,    "gar/results"
+  autoload :Suggestion,      "gar/results"
+  autoload :Synonyms,        "gar/synonyms"
   autoload :TestSupport,     "gar/test_support"
   autoload :Utils,           "gar/utils"
   autoload :XmlReader,       "gar/xml_reader"
@@ -34,8 +41,20 @@ module Gar
     # Возвращает настройки к значениям по умолчанию (тесты, перезагрузка кода в Rails)
     def reset_configuration!
       Database.disconnect!
+      Synonyms.reset!
       @configuration = nil
     end
+
+    # Автодополнение одной строки ввода (Т7): «Киров, Ленина 10б» → список Gar::Suggestion,
+    # дома с точным номером первыми, затем с номером-префиксом, затем улицы. Границы —
+    # region_codes: и within: (GUID города или района), как у Gar::Search
+    def autocomplete(query, hierarchy: nil, region_codes: nil, within: nil, limit: 10)
+      Autocomplete.new.call(query, hierarchy:, region_codes:, within:, limit:)
+    end
+
+    # Разобранный адрес объекта или дома по GUID (Т8) — Gar::Address со строкой по правилам ФНС;
+    # nil, если действующего объекта с таким GUID нет
+    def address(guid, hierarchy: nil) = AddressBuilder.new.call(guid, hierarchy:)
 
     # Соединение из пула поиска на время блока; недоступная база — UnavailableError
     def with_connection(&) = Database.with_connection(&)

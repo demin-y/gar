@@ -28,8 +28,8 @@ module Gar
                   :api_read_timeout, :database_url, :database_schema, :api_all_versions_url,
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
-                  :search_statement_timeout, :prune_hierarchy
-    attr_reader   :preset, :hierarchies, :region_codes
+                  :search_statement_timeout, :prune_hierarchy, :builtin_synonyms
+    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms
 
     def initialize
       # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
@@ -59,6 +59,10 @@ module Gar
       @pool_timeout                = 5
       @connect_timeout             = 2
       @search_statement_timeout    = 1
+      # Поиск: иерархия по умолчанию и синонимы поверх справочников ГАР (Gar::Synonyms)
+      @default_hierarchy           = :adm
+      @synonyms                    = {}.freeze
+      @builtin_synonyms            = true
     end
 
     # Сначала набор, затем тонкая настройка: явно заданные tables, param_types и keep_history
@@ -83,6 +87,24 @@ module Gar
       raise ConfigurationError, "Нужна хотя бы одна иерархия: adm или mun" if names.empty?
 
       @hierarchies = names
+    end
+
+    # Иерархия поиска и адреса, если её не передали: :adm или :mun
+    def default_hierarchy=(name)
+      @default_hierarchy = self.class.hierarchy(name)
+    end
+
+    def self.hierarchy(name)
+      name = name.to_sym if name.respond_to?(:to_sym)
+      return name if HIERARCHY_TABLES.key?(name)
+
+      raise ConfigurationError, "Иерархия — :adm или :mun, получено #{name.inspect}"
+    end
+
+    # Свои группы синонимов поиска: { "проспект" => %w[пркт], "имени" => %w[им] } — слово и его
+    # варианты; дополняют встроенный словарь и справочники типов ГАР
+    def synonyms=(groups)
+      @synonyms = groups.to_h { |word, variants| [word.to_s, Array(variants).map(&:to_s).freeze] }.freeze
     end
 
     # Коды субъектов — папки архива: %w[43 11] или [43, 11]. Пустой список — все субъекты

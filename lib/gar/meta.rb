@@ -25,7 +25,6 @@ module Gar
     }.map { |name, type| Schema::Column.new(name:, type:) }.freeze
     # Время каждой стадии: статус → колонка
     STAMPS = { "imported" => :imported_at, "ready" => :paths_built_at }.freeze
-    ARRAY  = PG::TextEncoder::Array.new
 
     class << self
       # Сведения схемы; nil — схема без gar_meta (создана не импортом гема)
@@ -43,10 +42,10 @@ module Gar
       def create(conn, schema, archive:, region_codes:, tables:)
         config = Gar.configuration
         values = {
-          version_id: archive.version_id, version_date: archive.version_date.iso8601, region_codes: ARRAY.encode(region_codes),
-          tables: ARRAY.encode(tables.map(&:to_s)),
-          param_types: (ARRAY.encode(config.param_types) unless config.param_types == :all),
-          keep_history: ARRAY.encode(config.keep_history.map(&:to_s)), prune_hierarchy: config.prune_hierarchy,
+          version_id: archive.version_id, version_date: archive.version_date.iso8601, region_codes: Database.array(region_codes),
+          tables: Database.array(tables.map(&:to_s)),
+          param_types: (Database.array(config.param_types) unless config.param_types == :all),
+          keep_history: Database.array(config.keep_history.map(&:to_s)), prune_hierarchy: config.prune_hierarchy,
           status: "importing", gem_version: VERSION
         }
         conn.exec("CREATE TABLE #{qualified(schema)} (#{COLUMNS.map(&:definition).join(', ')})")

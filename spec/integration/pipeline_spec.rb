@@ -31,9 +31,9 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       counts = Gar.configuration.import_tables.to_h { |table| [table.name, table_count(import_schema, table.name)] }
       expect(counts).to eq(
-        object_levels: 8, address_object_types: 7, house_types: 2, add_house_types: 2, apartment_types: 1, room_types: 1,
-        operation_types: 0, param_types: 4, normative_docs_kinds: 0, normative_docs_types: 0,
-        address_objects: 15, addr_obj_params: 3, adm_hierarchy: 23, mun_hierarchy: 26, houses: 11, house_params: 3
+        object_levels: 9, address_object_types: 9, house_types: 2, add_house_types: 2, apartment_types: 1, room_types: 1,
+        operation_types: 0, param_types: 5, normative_docs_kinds: 0, normative_docs_types: 0,
+        address_objects: 18, addr_obj_params: 4, adm_hierarchy: 26, mun_hierarchy: 29, houses: 11, house_params: 3
       )
     end
 
@@ -76,7 +76,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       importer.import_full_base(zip_path)
 
       expect(column_by_object(import_schema, "addr_obj_params", "value")).to eq(4_300_001 => "Кировская область", 4_300_010 => "610000",
-                                                                                807_356 => "Московская область")
+                                                                                4_300_003 => "1", 807_356 => "Московская область")
       expect(table_count(import_schema, "house_params")).to eq(3)
     end
 
@@ -142,8 +142,8 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(column_by_object(schema, "houses", "full_adm_path")[4_300_101]).to eq("Кировская обл, Киров г, Ленина ул, д. 10")
       expect(column_by_object(schema, "houses", "full_mun_path").values.uniq).to eq([nil])
       expect(search.search_houses("Ленина 10").size).to eq(2)
-      expect { search.search_houses("Ленина 10", path_type: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
-      expect { search.find_houses(guid(4_300_010), path_type: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
+      expect { search.search_houses("Ленина 10", hierarchy: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
+      expect { search.find_houses(guid(4_300_010), hierarchy: :mun) }.to raise_error(Gar::ConfigurationError, /mun не загружена/)
     end
 
     it "использует текущее название улицы в путях её домов" do
@@ -165,7 +165,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       found = search.search_address_objects("Киров")
 
       expect(found.first(2).map(&:name)).to contain_exactly("Киров", "город Киров")
-      expect(found.drop(2).map(&:name)).to contain_exactly("Ленина", "Воровского")
+      expect(found.drop(2).map(&:name)).to contain_exactly("Ленина", "Воровского", "Октябрьский", "Большая Садовая")
       expect(search.search_address_objects("Киров", limit: 2, offset: 1)).to eq(found[1, 2])
     end
 
@@ -181,7 +181,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
     it "отдаёт регионы и прямых потомков по иерархии" do
       expect(search.find_address_objects.map(&:name)).to contain_exactly("Кировская", "Коми", "Москва", "Московская")
-      expect(search.find_address_objects(parent_guid: guid(4_300_003)).map(&:name)).to eq(["Воровского", "Ленина"])
+      expect(search.find_address_objects(parent_guid: guid(4_300_003)).map(&:name)).to eq(["Большая Садовая", "Воровского", "Ленина", "Октябрьский"])
     end
 
     it "отдаёт активные дома улицы по номеру" do
