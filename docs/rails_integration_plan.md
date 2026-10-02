@@ -21,8 +21,8 @@
 | 6 | Поиск для формы (Т6–Т9), синонимы, ранжирование | ✅ готов |
 | 7 | Сопоставление старых адресов (Т10–Т11) | ✅ готов |
 | 8 | Загрузка из приложения и эксплуатация (Т12, Т13) | ✅ |
-| 9 | Дельты — обновление по крону | 🔶 PR открыт |
-| 10 | Railtie и документация (Т15, Т18, Т19) | — |
+| 9 | Дельты — обновление по крону | ✅ готов |
+| 10 | Railtie и документация (Т15, Т18, Т19) | 🔶 PR открыт |
 | 11 | Итоговое код-ревью и simplify | — |
 | 12 | (необязательный) Функции для наборов extended/full | — |
 
@@ -617,11 +617,11 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
 - [x] `examples/active_job_update.rb` + расписание Solid Queue (`config/recurring.yml`) в README.
 
 ### Этап 10. Railtie и документация (Т15, Т18, Т19)
-- [ ] Railtie грузится только при `defined?(Rails::Railtie)`. Rake-задачи: `gar:download`,
+- [x] Railtie грузится только при `defined?(Rails::Railtie)`. Rake-задачи: `gar:download`,
   `gar:import[region_codes]`, `gar:build_paths`, `gar:switch`, `gar:status`, `gar:update`
   (крон), `gar:cleanup`. Логгер Rails подхватывается.
-- [ ] Генератор `rails g gar:install` → `config/initializers/gar.rb`. Спеки на `railties`.
-- [ ] README заново:
+- [x] Генератор `rails g gar:install` → `config/initializers/gar.rb`. Спеки на `railties`.
+- [x] README заново:
   - `GAR_DATABASE_URL`, пул, fork, таймауты, gssencmode;
   - обновление по крону; пользователь только для чтения и отдельный импортёр (Т18);
   - таблица «архив / распаковка / база» для полной страны и двух субъектов (Т19). Известные
@@ -631,10 +631,10 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
     - XML к разбору: вся страна ≈ 94 ГБ без параметров и ≈ 188 ГБ с ними; два субъекта —
       2,95 ГБ;
     - размер базы и время — из прогона по чек-листу.
-- [ ] `docs/real_data_checklist.md`: импорт 43/11 с замерами, p95, проверка GUID,
+- [x] `docs/real_data_checklist.md`: импорт 43/11 с замерами, p95, проверка GUID,
   `Gar.address` против примера ФНС, `match_house` по 5 881 адресу, цепочка реальных дельт
   против полного импорта той же версии.
-- [ ] CHANGELOG, версия 2.0.0, обновлённые `examples/`.
+- [x] CHANGELOG, версия 2.0.0, обновлённые `examples/`.
 
 ### Этап 11. Итоговое код-ревью и simplify
 - [ ] `/code-review high` по всему диффу от `418b80e`, исправление находок.
@@ -1251,3 +1251,42 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
   строки потомков не трогаются). Спека: перенос улицы без строк её домов.
 - Заметки: API `fias.nalog.ru/WebServices` может быть недоступен там, где файлы доступны
   (`config.api_all_versions_url` настраивается) — в чек-лист реальных данных (этап 10).
+
+### 2026-10-02 — этап 10
+- PR этапа 9 (#11) слит; в ветку влит `release-2`. Базовый прогон: rspec — 334 примера, 0 падений.
+- Сделано:
+  - `Gar::Railtie` (`lib/gar/railtie.rb`, грузится из `lib/gar.rb` при `Rails::Railtie`) подключает
+    `lib/gar/tasks/gar.rake`: `gar:download[version_id]`, `gar:import[43,11]` (субъекты —
+    аргументы задачи), `gar:build_paths[схема]`, `gar:switch[схема]`, `gar:update`, `gar:status`,
+    `gar:cleanup`; `gar:environment` вызывает `environment` приложения, если он есть, — задачи
+    работают и без Rails (`load "gar/tasks/gar.rake"`, в том числе в `Rakefile` гема);
+  - `Gar::Tasks` — консольный слой задач: итог и прогресс (строка на стадию и каждые 10 %, без
+    `total` — одна) в `$stdout`; `gar:update` при `LockedError` сообщает и выходит без ошибки;
+  - `Gar.status` → `Gar::Status(current:, updates:, backups:, imports:)` с `Gar::SchemaInfo`
+    (имя, `gar_meta`, размер) — для `gar:status` и пульта приложения; `Delta.history` →
+    `[Gar::DeltaUpdate]`; `Schemas.imports`, `Schemas.sizes` (одним запросом);
+  - генератор `lib/generators/gar/install` → `config/initializers/gar.rb` (все настройки в
+    комментариях; загружается без изменения настроек — спека);
+  - README заново: «Объёмы» (Т19: архив 49,3 ГБ, распаковки нет, XML 94/188 ГБ на страну и
+    1,4/2,95 ГБ на два субъекта, дельта 20–45 МБ, база — по чек-листу), «Rails» (задачи,
+    расписание), «Подключение к базе» с пользователями (Т18): импортёр с `CREATE, TEMPORARY` на
+    базу и читатель через `ALTER DEFAULT PRIVILEGES FOR ROLE gar_importer` — проверено спекой
+    `database_users_spec.rb` (импорт и переключение под импортёром, поиск под читателем,
+    импорт под читателем — `permission denied`); требования Ruby 3.3+, PostgreSQL 16+;
+    разработка — ссылка на DEVELOPMENT.md;
+  - `docs/real_data_checklist.md`: импорт 43/11 с замерами, пути и размеры, p95, GUID ФИАС,
+    `match_house` по 5 881 адресу, `Gar.address`, дельты против полного импорта, API ФНС;
+  - версия 2.0.0; `examples/README.md` по существующим скриптам; `4_switch_to_imported_schema.rb`
+    и `fix_ssl.rb` вызывали несуществующие методы — исправлены.
+- `/simplify` (4 ревью), применено: `Gar.status` в библиотеке вместо сборки статуса в
+  `Gar::Tasks` (пул соединений и `UnavailableError`, размеры одним запросом), `DeltaUpdate`
+  вместо хешей и одно имя таблицы журнала (`Delta.updates_table`), без неиспользуемого `io` в
+  `Tasks`, один процесс Rails в спеке вместо двух, общие `load_current` (контекст архива) и
+  заглушки API ФНС (`spec/support/fias_api.rb`), имя схемы в подсказке — `Schemas.import_name`,
+  пример 4 берёт схему только из аргумента. Пропущено: повторное чтение `gar_meta` резервных
+  схем в `Gar.status` (`Schemas.backups` читает его для сортировки; резервных одна-две).
+- Итог: rspec — 340 примеров, 0 падений; покрытие строк 98,5 %; rubocop чист.
+- Заметки для следующих этапов:
+  - этап 11: итоговое ревью; размер базы в README — после прогона по чек-листу;
+  - если API ФНС с сервера портала недоступен — список выгрузок без API (решение по чек-листу).
+- Дальше: этап 11 (после слияния PR этапа 10).

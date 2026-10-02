@@ -77,6 +77,20 @@ module Gar
     # status, imported_at…) или nil, если её нет или она загружена не импортом гема
     def current_version = with_connection { Meta.read(_1, configuration.database_schema) }
 
+    # Состояние базы — Gar::Status: текущая схема, её последние дельты (не больше updates),
+    # резервные схемы и схемы импорта — с gar_meta и местом на диске. Хватает права SELECT
+    def status(updates: 5)
+      current = configuration.database_schema
+      with_connection do |conn|
+        backups = Schemas.backups(conn, current)
+        imports = Schemas.imports(conn, current)
+        sizes   = Schemas.sizes(conn, [current, *backups, *imports])
+        info    = ->(name) { SchemaInfo.new(name:, meta: Meta.read(conn, name), size: sizes.fetch(name)) }
+        Status.new(current: (info.call(current) if sizes.key?(current)), updates: Delta.history(conn, current, limit: updates),
+                   backups: backups.map(&info), imports: imports.map(&info))
+      end
+    end
+
     private
 
     def with_operation_connection

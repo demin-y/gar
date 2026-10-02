@@ -7,6 +7,7 @@ require "webmock/rspec"
 # Rake-задачи gar:* (Т15) — в отдельном Rake-приложении без Rails, со своей текущей схемой на пример
 RSpec.describe "Rake-задачи", :db do
   include_context "с синтетическим архивом"
+  include FiasApi
 
   let(:current) { isolated_schema("gar_rake") }
   let(:version) { "#{current}_v20260116" }
@@ -47,12 +48,7 @@ RSpec.describe "Rake-задачи", :db do
   it "gar:download и gar:update скачивают и загружают выгрузку из API ФНС" do
     WebMock.disable_net_connect!
     Gar.configuration.full_base_dir = File.join(archive_dir, "full")
-    full = "https://fias-file.nalog.ru/downloads/2026.01.16/gar_xml.zip"
-    stub_request(:get, "https://fias.nalog.ru/WebServices/Public/GetAllDownloadFileInfo")
-      .to_return(body: [{ VersionId: 20_260_116, GarXMLFullURL: full, GarXMLDeltaURL: "" }].to_json)
-    stub_request(:get, "https://fias.nalog.ru/WebServices/Public/GetLastDownloadFileInfo")
-      .to_return(body: { VersionId: 20_260_116, GarXMLFullURL: full }.to_json)
-    stub_request(:get, full).to_return(body: File.binread(zip_path))
+    stub_fias_versions(20_260_116 => { full: zip_path })
 
     expect(rake("gar:download")).to include("Скачивание", "Архив: #{Gar.configuration.full_base_dir}")
     expect(rake("gar:update")).to include("Полный импорт: версия — → 20260116")
@@ -74,48 +70,32 @@ RSpec.describe "Rake-задачи", :db do
     other&.close
   end
 
-  describe "в Rails-приложении" do
-    # Отдельный процесс: Rails не должен попасть в остальные спеки
-    def ruby(script)
-      Dir.mktmpdir("gar_rails") do |dir|
-        stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-I", File.expand_path("../../lib", __dir__), "-e", script, chdir: dir)
-        raise "Ошибка процесса: #{stderr}" unless status.success?
-
-        [stdout, dir]
+  # Отдельный процесс: Rails не должен попасть в остальные спеки
+  it "в Rails-приложении: генератор создаёт инициализатор, Railtie подключает задачи, логгер — Rails.logger" do
+    script = <<~RUBY
+      require "rails"
+      require "rails/generators"
+      require "gar"
+      Rails::Generators.invoke("gar:install", [], destination_root: Dir.pwd)
+      default = Gar.configuration.database_schema
+      load "config/initializers/gar.rb"
+      puts Gar.configuration.database_schema == default
+      class GarApp < Rails::Application
+        config.eager_load = false
+        config.logger     = Logger.new(nil)
+        config.root       = Dir.pwd
       end
-    end
+      GarApp.initialize!
+      GarApp.load_tasks
+      puts Rake::Task.tasks.map(&:name).grep(/\\Agar:/).sort.join(",")
+      puts Gar.logger.equal?(Rails.logger)
+    RUBY
+    lib = File.expand_path("../../lib", __dir__)
+    stdout, stderr, status = Dir.mktmpdir("gar_rails") { Open3.capture3(RbConfig.ruby, "-I", lib, "-e", script, chdir: _1) }
 
-    it "Railtie подключает rake-задачи, логгер гема — Rails.logger" do
-      stdout, = ruby(<<~RUBY)
-        require "rails"
-        require "gar"
-        class GarApp < Rails::Application
-          config.eager_load = false
-          config.logger     = Logger.new(nil)
-          config.root       = Dir.pwd
-        end
-        GarApp.initialize!
-        GarApp.load_tasks
-        puts Rake::Task.tasks.map(&:name).grep(/\\Agar:/).sort.join(",")
-        puts Gar.logger.equal?(Rails.logger)
-      RUBY
-
-      expect(stdout.lines.map(&:chomp)).to eq(["gar:build_paths,gar:cleanup,gar:download,gar:environment,gar:import,gar:status,gar:switch,gar:update",
-                                               "true"])
-    end
-
-    it "rails g gar:install создаёт инициализатор, который загружается без изменений настроек" do
-      stdout, = ruby(<<~RUBY)
-        require "rails/generators"
-        require "gar"
-        Rails::Generators.invoke("gar:install", [], destination_root: Dir.pwd)
-        default = Gar.configuration.database_schema
-        load "config/initializers/gar.rb"
-        puts File.exist?("config/initializers/gar.rb"), Gar.configuration.database_schema == default
-      RUBY
-
-      expect(stdout).to include("create  config/initializers/gar.rb")
-      expect(stdout.lines.last(2).map(&:chomp)).to eq(["true", "true"])
-    end
+    expect(status).to be_success, stderr
+    expect(stdout).to include("create  config/initializers/gar.rb")
+    expect(stdout.lines.last(3).map(&:chomp))
+      .to eq(["true", "gar:build_paths,gar:cleanup,gar:download,gar:environment,gar:import,gar:status,gar:switch,gar:update", "true"])
   end
 end

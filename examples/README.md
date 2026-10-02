@@ -13,7 +13,7 @@
 | `1_download_full_database.rb` | скачивает последнюю полную выгрузку в `config.full_base_dir` (≈ 49 ГБ) |
 | `2_import_full_base.rb` | загружает субъекты 43 и 11 из скачанного архива в схему `gar_v<версия>` |
 | `3_populate_full_paths.rb [схема]` | строит пути схемы — нужны полнотекстовому поиску |
-| `4_switch_to_imported_schema.rb [схема]` | делает готовую схему текущей |
+| `4_switch_to_imported_schema.rb <схема>` | делает готовую схему текущей |
 | `5_search.rb` | примеры поиска `Gar::Search` |
 
 ## Rails

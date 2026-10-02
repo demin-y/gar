@@ -56,10 +56,13 @@ module Gar
         end
       end
 
-      # Место на диске под таблицы схемы с индексами и TOAST, байт
-      def size(conn, name)
-        conn.exec_params("SELECT COALESCE(sum(pg_total_relation_size(c.oid)), 0) FROM pg_class c " \
-                         "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'm')", [name]).getvalue(0, 0).to_i
+      # Место на диске под таблицы схем names с индексами и TOAST: { схема => байт }, одним запросом
+      def sizes(conn, names)
+        conn.exec_params(<<~SQL, [Database.array(names)]).to_h { [_1["name"], _1["size"].to_i] }
+          SELECT n.nspname AS name, COALESCE(sum(pg_total_relation_size(c.oid)), 0) AS size
+          FROM pg_namespace n LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relkind IN ('r', 'm')
+          WHERE n.nspname = ANY($1::text[]) GROUP BY n.nspname
+        SQL
       end
 
       # Удаляет схемы names и возвращает их

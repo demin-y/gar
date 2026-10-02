@@ -2,17 +2,13 @@
 
 module Gar
   # Команды rake-задач gar:* (Т15): вызывают операции гема (Gar.download, Gar.import…) и пишут
-  # итог и прогресс долгих шагов в io — консоль задачи. Логи гема идут в Gar.logger как обычно.
+  # итог и прогресс долгих шагов в $stdout — консоль задачи. Логи гема идут в Gar.logger как обычно.
   # Ошибки — исключения гема: rake печатает их и завершается с ненулевым кодом.
   class Tasks
     STAGES = { download: "Скачивание", import: "Импорт", indexes: "Индексы", paths: "Пути", switch: "Переключение",
                delta: "Дельта" }.freeze
     # Прогресс печатается каждые STEP процентов
     STEP = 10
-
-    def initialize(io = $stdout)
-      @io = io
-    end
 
     def download(version_id = nil)
       say "Архив: #{Gar.download(version_id && Integer(version_id), on_progress: progress)}"
@@ -34,7 +30,9 @@ module Gar
     end
 
     def switch(schema)
-      raise ConfigurationError, "Укажите схему: rake \"gar:switch[#{current}_v<версия>]\" (список — rake gar:status)" if schema.to_s.empty?
+      if schema.to_s.empty?
+        raise ConfigurationError, "Укажите схему: rake \"gar:switch[#{Schemas.import_name(current, '<версия>')}]\" (список — rake gar:status)"
+      end
 
       Gar.switch(schema, on_progress: progress)
       say "Схема #{schema} стала текущей (#{current})"
@@ -57,32 +55,28 @@ module Gar
       say removed.empty? ? "Лишних схем нет" : "Удалены схемы: #{removed.join(', ')}"
     end
 
-    # Текущая схема, применённые дельты, резервные схемы и схемы импорта — с версией, статусом
-    # и местом на диске
+    # Текущая схема, её последние дельты, резервные схемы и схемы импорта (Gar.status)
     def status
-      conn = Database.create_connection
-      meta = Meta.read(conn, current)
+      status = Gar.status
+      meta   = status.current&.meta
       return say("Текущей схемы #{current} нет: rake gar:update или gar:download, gar:import, gar:build_paths, gar:switch") unless meta
 
-      say "Текущая схема #{current}: #{describe(conn, current, meta)}"
       regions = meta.region_codes.empty? ? "все" : meta.region_codes.join(", ")
+      say "Текущая схема #{describe(status.current)}"
       say "  субъекты: #{regions}; таблицы: #{(meta.tables & Configuration::REGIONAL_TABLES).join(', ')}"
       say "  импорт: #{meta.imported_at || '—'}, пути: #{meta.paths_built_at || '—'}, гем #{meta.gem_version}"
-      Delta.history(conn, current, limit: 5).each do |update|
-        say "  дельта #{update[:version_id]}: #{update[:applied_at]}, #{update[:upserted]} записей изменено, #{update[:deleted]} удалено"
-      end
-      (Schemas.backups(conn, current) + Schemas.imports(conn, current)).each { say "#{_1}: #{describe(conn, _1, Meta.read(conn, _1))}" }
-    ensure
-      conn&.close
+      status.updates.each { say "  дельта #{_1.version_id}: #{_1.applied_at}, #{_1.upserted} записей изменено, #{_1.deleted} удалено" }
+      (status.backups + status.imports).each { say describe(_1) }
     end
 
     private
 
     def current = Gar.configuration.database_schema
 
-    def describe(conn, schema, meta)
+    def describe(schema)
+      meta  = schema.meta
       state = meta ? "версия #{meta.version_id} (#{meta.version_date}), #{meta.status}" : "без gar_meta"
-      "#{state}, #{Utils.format_size(Schemas.size(conn, schema))}"
+      "#{schema.name}: #{state}, #{Utils.format_size(schema.size)}"
     end
 
     # on_progress шагов: строка при смене стадии и каждые STEP процентов (без total — одна)
@@ -98,6 +92,6 @@ module Gar
       end
     end
 
-    def say(line) = @io.puts(line)
+    def say(line) = $stdout.puts(line)
   end
 end

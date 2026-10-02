@@ -11,9 +11,9 @@ RSpec.describe "Пользователи базы", :db do
   let(:importer) { "gar_importer_#{suffix}" }
   let(:reader)   { "gar_reader_#{suffix}" }
   let(:current)  { isolated_schema("gar_users") }
+  let(:database) { db_connection.quote_ident(db_connection.db) }
 
   before do
-    database = db_connection.quote_ident(db_connection.db)
     [importer, reader].each { db_connection.exec("CREATE ROLE #{_1} LOGIN PASSWORD 'secret'") }
     db_connection.exec("GRANT CONNECT, CREATE, TEMPORARY ON DATABASE #{database} TO #{importer}")
     db_connection.exec("GRANT CONNECT ON DATABASE #{database} TO #{reader}")
@@ -24,7 +24,6 @@ RSpec.describe "Пользователи базы", :db do
 
   after do
     Gar::Database.disconnect!
-    database = db_connection.quote_ident(db_connection.db)
     [importer, reader].each do |role|
       db_connection.exec("DROP OWNED BY #{role} CASCADE")
       db_connection.exec("REVOKE ALL ON DATABASE #{database} FROM #{role}")
@@ -41,7 +40,7 @@ RSpec.describe "Пользователи базы", :db do
 
   it "импортёр загружает и переключает схему, читатель ищет и не может изменить базу" do
     connect_as(importer)
-    Gar.switch(Gar.import(zip_path, region_codes: ["43"]).tap { Gar.build_paths(_1) })
+    load_current(region_codes: ["43"])
 
     connect_as(reader)
     expect(Gar.available?).to be(true)

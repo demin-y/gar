@@ -61,7 +61,7 @@ bin/rails g gar:install   # config/initializers/gar.rb со всеми наст�
 - **Диск под базу:** при полном импорте новая схема загружается рядом с текущей, а после
   переключения прежняя остаётся резервной (`config.keep_backups = 1`) — на пике это три копии
   схемы. Дельты меняют текущую схему на месте.
-- `rake gar:status` показывает место, которое занимает каждая схема.
+- `rake gar:status` (`Gar.status`) показывает место, которое занимает каждая схема.
 
 ## Rails
 
@@ -207,6 +207,7 @@ Gar.switch(schema, on_progress: progress)                      # :switch
 Gar.cleanup_schemas                                            # => имена удалённых схем
 
 Gar.current_version # => Gar::Meta текущей схемы (version_id, version_date, region_codes, status…) или nil
+Gar.status          # => Gar::Status: current, updates (последние дельты), backups, imports — для пульта
 ```
 
 - **Имена схем.** Импорт идёт в `<database_schema>_v<версия>` (`gar_v20260116`), прежняя

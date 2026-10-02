@@ -13,8 +13,10 @@
   `gar:cleanup`. Задачи печатают итог и прогресс; `gar:update` при `LockedError` сообщает и выходит
   без ошибки. Без Rails — `load "gar/tasks/gar.rake"`; команды задач — `Gar::Tasks`.
 - Генератор `rails g gar:install` → `config/initializers/gar.rb` со всеми настройками в комментариях.
-- `Gar::Delta.history(conn, schema, limit:)` — журнал применённых дельт; `Gar::Schemas.imports`
-  и `Gar::Schemas.size` — схемы импорта и место на диске.
+- `Gar.status(updates: 5)` → `Gar::Status(current:, updates:, backups:, imports:)` — схемы
+  (`Gar::SchemaInfo`: имя, `gar_meta`, место на диске) и последние дельты; хватает права `SELECT`.
+- `Gar::Delta.history(conn, schema, limit:)` → `[Gar::DeltaUpdate]` — журнал применённых дельт;
+  `Gar::Schemas.imports`, `Gar::Schemas.sizes`.
 - Версия гема — 2.0.0.
 
 **Документация**

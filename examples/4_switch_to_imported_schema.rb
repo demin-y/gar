@@ -5,15 +5,11 @@
 # прежняя текущая — резервной, лишние резервные удаляются. Переключить можно только готовую
 # схему — после 3_populate_full_paths.rb. То же в Rails — rake "gar:switch[gar_v20260116]".
 #
-#   ./examples/4_switch_to_imported_schema.rb [схема]   # по умолчанию — схема последнего скачанного архива
+#   ./examples/4_switch_to_imported_schema.rb gar_v20260116   # имя схемы печатает 2_import_full_base.rb
 
 require "gar"
 
-schema = ARGV[0]
-unless schema
-  zip_path = Gar::Importer.find_latest_full_base_zip or abort "ZIP файлы не найдены в #{Gar.configuration.full_base_dir}"
-  schema   = Gar::Schemas.import_name(Gar.configuration.database_schema, Gar::Archive.new(zip_path).version_id)
-end
+schema = ARGV[0] or abort "Укажите схему: #{$PROGRAM_NAME} gar_v<версия> (её имя печатает 2_import_full_base.rb)"
 
 begin
   Gar.switch(schema)
