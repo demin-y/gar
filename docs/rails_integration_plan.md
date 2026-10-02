@@ -15,8 +15,8 @@
 | 0 | Подготовка, тестовая инфраструктура, характеризационные тесты | ✅ готов |
 | 1 | Рефакторинг импорта | ✅ готов |
 | 2 | Рефакторинг путей, загрузчика, конфигурации | ✅ готов |
-| 3 | Безопасная работа в Rails-процессе (Т1–Т4, Т14, Т17) | ⏳ следующий |
-| 4 | Объём и данные (Т5, Т8-импорт, Т13-meta) | — |
+| 3 | Безопасная работа в Rails-процессе (Т1–Т4, Т14, Т17) | ✅ готов |
+| 4 | Объём и данные (Т5, Т8-импорт, Т13-meta) | ⏳ следующий |
 | 5 | Тестовые данные и `Gar::TestSupport` (Т16) | — |
 | 6 | Поиск для формы (Т6–Т9), синонимы, ранжирование | — |
 | 7 | Сопоставление старых адресов (Т10–Т11) | — |
@@ -487,23 +487,23 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
 - [x] README: убраны несуществующие методы (п. 19).
 
 ### Этап 3. Безопасная работа внутри Rails-процесса (Т1–Т4, Т14, Т17)
-- [ ] Т1: `database_url` берётся из `ENV["GAR_DATABASE_URL"]`, иначе `nil`. Без настройки при
+- [x] Т1: `database_url` берётся из `ENV["GAR_DATABASE_URL"]`, иначе `nil`. Без настройки при
   первом обращении — `Gar::ConfigurationError` с подсказкой. Makefile, docker-compose,
   `.env.example` и примеры переходят на новую переменную.
-- [ ] Т2: `Gar.with_connection`, `config.pool_size = 5`, `config.pool_timeout`. `Search` берёт
+- [x] Т2: `Gar.with_connection`, `config.pool_size = 5`, `config.pool_timeout`. `Search` берёт
   соединение на время вызова.
-- [ ] Т3: проверка `pid` при выдаче соединения; в ребёнке пул пересоздаётся без `PQfinish`.
+- [x] Т3: проверка `pid` при выдаче соединения; в ребёнке пул пересоздаётся без `PQfinish`.
   В README — `gssencmode=disable` для macOS.
-- [ ] Т4:
+- [x] Т4:
   - `config.connect_timeout` (у libpq минимум 2 с) и `config.search_statement_timeout`;
   - у импорта свои соединения без таймаута;
   - `ConnectionBad`, `UnableToSend`, `QueryCanceled` и `ConnectionPool::TimeoutError` →
     `Gar::UnavailableError`.
-- [ ] Т14: `Gar.available?` проверяет текущую схему и `full_adm_path`; работает под
+- [x] Т14: `Gar.available?` проверяет текущую схему и `full_adm_path`; работает под
   пользователем только с `SELECT`.
-- [ ] Т17: событие `search.gar` через `ActiveSupport::Notifications`, если он есть.
-- [ ] `Search` на пуле и `Data`, `mini_sql` убран (п. 18).
-- [ ] Спеки:
+- [x] Т17: событие `search.gar` через `ActiveSupport::Notifications`, если он есть.
+- [x] `Search` на пуле и `Data`, `mini_sql` убран (п. 18).
+- [x] Спеки:
   - N потоков параллельного поиска;
   - fork: ребёнок делает запрос, соединение родителя живо;
   - недоступный хост → `available?` false за `connect_timeout`, поиск бросает
@@ -872,3 +872,56 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
     `paths` в `PathBuilder#batch_sql`; признак построенных путей — в `gar_meta`;
   - реальные данные: время `PathBuilder#build` на 43/11 и рост таблиц (п. 17).
 - Дальше: этап 3.
+
+### 2026-10-02 — этап 3
+- Ветка `claude/project-thread-slx7zj` пересоздана от `origin/release-2` (PR этапа 2 слит).
+  Базовый прогон: rspec — 237 примеров, 0 падений, 1 pending; rubocop чист.
+- Сделано:
+  - Т1: `database_url` — `ENV["GAR_DATABASE_URL"]`, иначе `nil`; при первом соединении без
+    адреса — `ConfigurationError` с подсказкой. docker-compose, `.env.example`, Makefile,
+    DEVELOPMENT, README и examples — на `GAR_DATABASE_URL`;
+  - Т2: `Gar::Database` стал модулем соединений: пул `connection_pool` (`pool_size` 5,
+    `pool_timeout` 5 с), `Gar.with_connection`; пул пересоздаётся при смене своих настроек
+    (ключ из адреса и таймаутов), без блокировки на горячем пути. `Database.connection`,
+    `with_retry`, `reconnect!` и `db_retry_*` удалены;
+  - Т3: хук `Process._fork` (`Database::ForkTracker`) в ребёнке отбрасывает без `PQfinish`
+    все соединения гема — открытые им и переданные в `Importer`/`PathBuilder`
+    (`Database.adopt`, реестр `WeakMap`) — и сбрасывает пул; `auto_reload_after_fork`
+    пула выключен (он закрыл бы соединения родителя). `discard_inherited_connections`
+    удалён. README — `gssencmode=disable` для macOS;
+  - Т4: `connect_timeout` (2 с) у всех соединений, `search_statement_timeout` (1 с) — у
+    пула, передаётся при подключении (`-c statement_timeout`, переживает `RESET ALL`);
+    `ConnectionBad`, `UnableToSend`, `QueryCanceled`, `ConnectionPool::TimeoutError` →
+    `UnavailableError`, оборванное соединение не возвращается в пул;
+  - Т14: `Gar.available?` — только каталог: таблица `address_objects` и GIN-индексы путей
+    (PathBuilder создаёт их последними), ошибки соединения и прав — `false`;
+  - Т17: `Gar.instrument` → `search.gar` (`method`, `query`/`guid`/`parent_guid`, `schema`,
+    `count`) из каждого метода `Search`;
+  - `Search` (п. 18): `exec_params`, `Data`-результаты `Gar::AddressObject`/`Gar::House`
+    (OBJECTID — `gar_id`: `object_id` занят Ruby), схема фиксируется при создании, имена
+    через `Schema`; поиск по названию и пути — один запрос, путь сканируется только если
+    названий не хватило; лишний `DISTINCT` убран; некорректный GUID — `nil`/`[]` без запроса;
+    ошибка 19 исправлена (`level = ANY($n::int[])`). `mini_sql` удалён, `Utils.full_table_name` тоже;
+  - спеки: `database_spec` заново (настройка, statement_timeout пула и импорта, смена
+    настроек, потоки, таймауты → `UnavailableError`, оборванное соединение, fork: ребёнок с
+    запросом и ребёнок с обычным выходом; `available?`), `search_spec` с точными
+    ожиданиями, событие `search.gar`; в `pipeline_spec` — порядок «название, затем путь» и
+    общая пагинация, pending ошибки 19 снят. Обе fork-спеки падают без хука (проверено).
+- `/simplify` (4 ревью), применено: одна трансляция ошибок (`Database.with_connection(conn)`),
+  `adopt` вместо второго механизма fork, пул по ключу настроек вместо сброса в `configure`,
+  `statement_timeout` при подключении, без мьютекса на горячем пути, путь сканируется
+  только при нехватке совпадений по названию, `available?` без скана таблицы,
+  `Gar.instrument` на уровне модуля, иерархии из `HIERARCHY_TABLES`, `tsquery` без
+  распаковки параметров, мёртвый `Loggable` в `Search`.
+  Пропущено: хранимый `name_tsv` вместо выражения в индексе (схема — этап 4/6);
+  общий `from_row` через `PG::BasicTypeMapForResults` и алиасы в SQL (результаты
+  расширяются в этапе 6 — там и обобщить); `house_types` после top-N в `search_houses`
+  (поиск переписывается в этапе 6).
+- Итог: rspec — 220 примеров, 0 падений, 0 pending; rubocop чист.
+- Заметки для следующих этапов:
+  - этап 6: результаты (`region_code`, `Suggestion`, `Address`) — общий конструктор из
+    строки, колонки в одном месте; `name_tsv` хранимой колонкой; `hierarchy:` вместо
+    `path_type:` и `config.default_hierarchy`;
+  - этап 8: rake/ActiveJob-импорт — соединения импорта открывать в задаче, не до fork;
+  - этап 10: README — пользователь только с `SELECT` для поиска (Т18).
+- Дальше: этап 4.

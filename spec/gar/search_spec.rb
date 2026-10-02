@@ -47,7 +47,6 @@ RSpec.describe Gar::Search, :db do
   end
 
   it "ищет в схеме, переданной явно" do
-    expect(described_class.new(schema: "нет_такой").schema).to eq("нет_такой")
     expect { described_class.new(schema: "нет_такой").find_address_object_by_guid(street_guid) }.to raise_error(PG::UndefinedTable)
   end
 

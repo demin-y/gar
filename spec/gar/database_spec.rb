@@ -30,6 +30,14 @@ RSpec.describe Gar::Database do
       conn&.close
     end
 
+    it "пересоздаёт пул, когда меняются его настройки" do
+      expect(Gar.with_connection { _1.exec("SHOW statement_timeout").getvalue(0, 0) }).to eq("1s")
+
+      Gar.configuration.search_statement_timeout = 2
+
+      expect(Gar.with_connection { _1.exec("SHOW statement_timeout").getvalue(0, 0) }).to eq("2s")
+    end
+
     it "раздаёт потокам разные соединения в пределах pool_size" do
       Gar.configure { _1.pool_size = 3 }
       search = Gar::Search.new

@@ -25,10 +25,8 @@ module Gar
       @configuration ||= Configuration.new
     end
 
-    # Новые настройки действуют на соединения, открытые после блока: пул поиска закрывается
     def configure
       yield(configuration)
-      Database.disconnect!
     end
 
     # Возвращает настройки к значениям по умолчанию (тесты, перезагрузка кода в Rails)
@@ -40,14 +38,16 @@ module Gar
     # Соединение из пула поиска на время блока; недоступная база — UnavailableError
     def with_connection(&) = Database.with_connection(&)
 
-    # База доступна и готова к поиску: текущая схема есть и пути в ней построены. Для
-    # проверки хватает права SELECT; ошибка соединения или прав — false
+    # База доступна и готова к поиску: текущая схема есть и пути в ней построены (их
+    # полнотекстовые индексы PathBuilder создаёт последними). Запрос только к каталогу,
+    # хватает права SELECT; ошибка соединения или прав — false
     def available?
+      schema  = configuration.database_schema
+      markers = Configuration::HIERARCHY_TABLES.keys.map { "#{Schema.quote(schema)}.#{Schema.quote("idx_address_objects_full_#{_1}_path_tsv")}" }
       with_connection do |conn|
-        table = "#{Schema.quote(configuration.database_schema)}.address_objects"
-        next false unless conn.exec_params("SELECT to_regclass($1)", [table]).getvalue(0, 0)
-
-        conn.exec("SELECT EXISTS (SELECT FROM #{table} WHERE full_adm_path IS NOT NULL OR full_mun_path IS NOT NULL)").getvalue(0, 0) == "t"
+        conn.exec_params(<<~SQL, [Schema.fetch(:address_objects).qualified_name(schema), *markers]).getvalue(0, 0) == "t"
+          SELECT to_regclass($1) IS NOT NULL AND (#{markers.each_index.map { "to_regclass($#{_1 + 2}) IS NOT NULL" }.join(' OR ')})
+        SQL
       end
     rescue UnavailableError, PG::Error => e
       logger.warn "База ГАР недоступна: #{e.message.strip}"
@@ -60,6 +60,14 @@ module Gar
 
     def logger=(value)
       configuration.logger = value
+    end
+
+    # Событие name через ActiveSupport::Notifications, если он загружен; в payload блок
+    # дописывает итоги (например, число результатов)
+    def instrument(name, payload = {}, &)
+      return yield(payload) unless defined?(ActiveSupport::Notifications)
+
+      ActiveSupport::Notifications.instrument(name, payload, &)
     end
   end
 end

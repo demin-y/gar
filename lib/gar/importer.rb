@@ -16,7 +16,7 @@ module Gar
     attr_reader :db_conn
 
     def initialize(db_conn = nil)
-      @db_conn = db_conn || Database.create_connection
+      @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
     end
 
     # Возвращает имя схемы с данными. region_codes — коды субъектов (папки архива), по умолчанию
@@ -101,9 +101,7 @@ module Gar
     # каждого загруженного файла с числом записей
     def each_loaded(archive, jobs, schema)
       if Gar.configuration.parallel_import && jobs.size > 1
-        parent_pid = Process.pid
         Parallel.each(jobs, **parallel_options, finish: ->(job, _index, count) { yield job, count }) do |job|
-          Database.discard_inherited_connections(parent_pid)
           with_worker_connection { |conn| load_job(conn, archive, job, schema) }
         end
       else

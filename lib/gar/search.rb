@@ -10,10 +10,7 @@ module Gar
   #
   # path_type — иерархия: :adm (административная) или :mun (муниципальная).
   class Search
-    include Loggable
-
-    PATH_TYPES = [:adm, :mun].freeze
-    UUID       = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
+    UUID = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
     # Регионы, затем районы, города, населённые пункты и улицы
     LEVEL_ORDER = "array_position(ARRAY[1, 2, 5, 6, 8], ao.level)"
 
@@ -28,22 +25,32 @@ module Gar
     # Полнотекстовый поиск адресных объектов: сначала совпадения по названию, затем — только
     # по полному пути. autocomplete — последнее слово ищется как префикс
     def search_address_objects(query, path_type: :adm, limit: 20, offset: 0, autocomplete: false)
-      search_query = tsquery(query, autocomplete)
-      return [] unless search_query
+      function, text = tsquery(query, autocomplete)
+      return [] unless text
 
       path = path_column(path_type)
       name = "to_tsvector('russian', ao.name || ' ' || ao.type_name)"
+      # Совпадения по пути ищутся, только если по названию не набралось limit + offset:
+      # условие на named — однократный фильтр, скан путей тогда не выполняется
       instrument(:search_address_objects, query:) do
-        select(AddressObject, <<~SQL, search_query, limit, offset)
-          SELECT * FROM (
-            SELECT #{ADDRESS_OBJECT_COLUMNS}, 0 AS phase, ts_rank_cd(#{name}, q) AS rank
-            FROM #{table(:address_objects)} ao, #{search_query[:function]}('russian', $1) q
-            WHERE ao.is_active AND #{name} @@ q
-            UNION ALL
-            SELECT #{ADDRESS_OBJECT_COLUMNS}, 1, ts_rank_cd(ao.#{path}_tsv, q)
-            FROM #{table(:address_objects)} ao, #{search_query[:function]}('russian', $1) q
-            WHERE ao.is_active AND ao.#{path}_tsv @@ q AND NOT #{name} @@ q
-          ) ao
+        select(AddressObject, <<~SQL, text, limit, offset)
+          WITH q AS (SELECT #{function}('russian', $1) AS q),
+          named AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, 0 AS phase, ts_rank_cd(#{name}, q.q) AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE ao.is_active AND #{name} @@ q.q
+            ORDER BY rank DESC, #{LEVEL_ORDER}, ao.name
+            LIMIT $2::int + $3::int
+          ),
+          by_path AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, 1 AS phase, ts_rank_cd(ao.#{path}_tsv, q.q) AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE (SELECT count(*) FROM named) < $2::int + $3::int
+              AND ao.is_active AND ao.#{path}_tsv @@ q.q AND NOT #{name} @@ q.q
+            ORDER BY rank DESC, #{LEVEL_ORDER}, ao.name
+            LIMIT $2::int + $3::int
+          )
+          SELECT * FROM (SELECT * FROM named UNION ALL SELECT * FROM by_path) ao
           ORDER BY phase, rank DESC, #{LEVEL_ORDER}, name
           LIMIT $2 OFFSET $3
         SQL
@@ -52,15 +59,15 @@ module Gar
 
     # Полнотекстовый поиск домов по полному пути
     def search_houses(query, path_type: :adm, limit: 20, offset: 0, autocomplete: false)
-      search_query = tsquery(query, autocomplete)
-      return [] unless search_query
+      function, text = tsquery(query, autocomplete)
+      return [] unless text
 
       path = path_column(path_type)
       instrument(:search_houses, query:) do
-        select(House, <<~SQL, search_query, limit, offset)
+        select(House, <<~SQL, text, limit, offset)
           SELECT #{HOUSE_COLUMNS}
           FROM #{table(:houses)} h
-          CROSS JOIN #{search_query[:function]}('russian', $1) q
+          CROSS JOIN #{function}('russian', $1) q
           LEFT JOIN #{table(:house_types)} ht ON ht.id = h.house_type
           WHERE h.is_active AND h.#{path}_tsv @@ q
           ORDER BY ts_rank_cd(h.#{path}_tsv, q) DESC, h.house_num
@@ -72,6 +79,8 @@ module Gar
     # Каскадный поиск: регионы (без parent_guid) или прямые потомки объекта по иерархии.
     # level — уровень или список уровней
     def find_address_objects(parent_guid: nil, path_type: :adm, level: nil, limit: 50, offset: 0)
+      return [] if parent_guid && !parent_guid.to_s.match?(UUID)
+
       levels = level && "{#{Array(level).map { Integer(_1) }.join(',')}}"
       instrument(:find_address_objects, parent_guid:) do
         if parent_guid.nil?
@@ -82,8 +91,6 @@ module Gar
             LIMIT $2 OFFSET $3
           SQL
         else
-          next [] unless parent_guid.to_s.match?(UUID)
-
           select(AddressObject, <<~SQL, parent_guid, levels, limit, offset)
             SELECT #{ADDRESS_OBJECT_COLUMNS}
             FROM #{children(path_type)}
@@ -144,18 +151,7 @@ module Gar
     private
 
     def select(result_class, sql, *params)
-      params = params.map { _1.is_a?(Hash) ? _1[:text] : _1 }
-      with_connection { |conn| conn.exec_params(sql, params).map { result_class.from_row(_1) } }
-    end
-
-    def with_connection(&)
-      return Gar.with_connection(&) unless db_conn
-
-      begin
-        yield db_conn
-      rescue *Database::UNAVAILABLE_ERRORS => e
-        raise UnavailableError, "База ГАР недоступна: #{e.message.strip}"
-      end
+      Database.with_connection(db_conn) { |conn| conn.exec_params(sql, params).map { result_class.from_row(_1) } }
     end
 
     # Действующие строки иерархии (алиас as) — прямые потомки действующего объекта с GUID $1
@@ -165,30 +161,30 @@ module Gar
         "AND parent.object_guid = $1 AND parent.is_active AND #{as}.is_active"
     end
 
-    # Текст запроса и функция tsquery; nil — пустой запрос
+    # Функция tsquery и текст запроса; текст nil — пустой запрос
     def tsquery(query, autocomplete)
       if autocomplete
         words = query.to_s.gsub(/[!|&:*()\\'"<>]/, " ").split
-        { text: "#{words.join(' & ')}:*", function: "to_tsquery" } if words.any?
+        ["to_tsquery", ("#{words.join(' & ')}:*" if words.any?)]
       else
-        { text: query.to_s.strip, function: "websearch_to_tsquery" } unless query.to_s.strip.empty?
+        ["websearch_to_tsquery", query.to_s.strip.then { _1 unless _1.empty? }]
       end
     end
 
     def path_column(path_type) = "full_#{check_path_type(path_type)}_path"
 
     def check_path_type(path_type)
-      PATH_TYPES.include?(path_type) ? path_type : raise(ArgumentError, "path_type: :adm или :mun, получено #{path_type.inspect}")
+      return path_type if Configuration::HIERARCHY_TABLES.key?(path_type)
+
+      raise ArgumentError, "path_type: #{Configuration::HIERARCHY_TABLES.keys.map(&:inspect).join(' или ')}, получено #{path_type.inspect}"
     end
 
     def instrument(method, **payload)
-      return yield unless defined?(ActiveSupport::Notifications)
-
-      ActiveSupport::Notifications.instrument("search.gar", method:, schema:, **payload) do |event|
-        yield.tap { event[:count] = _1.nil? ? 0 : Array(_1).size }
+      Gar.instrument("search.gar", { method:, schema:, **payload }) do |event|
+        yield.tap { event[:count] = Array(_1).size }
       end
     end
 
-    def table(name) = "#{Schema.quote(schema)}.#{Schema.quote(name)}"
+    def table(name) = Schema.fetch(name).qualified_name(schema)
   end
 end
