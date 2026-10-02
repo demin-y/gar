@@ -62,6 +62,14 @@ module Gar
       include Serializable
     end
 
+  # Итог Gar.update!: kind — :none (база уже последней версии), :delta (применены дельты
+  # versions) или :full (полный импорт версии to_version); from_version — версия до обновления
+  # (nil — базы не было)
+  UpdateResult =
+    Data.define(:kind, :from_version, :to_version, :versions) do
+      include Serializable
+    end
+
   # Разобранный адрес (Gar.address). Части — полные наименования элементов пути («Кировская
   # область», «город Киров», «улица Ленина»); house — номер с литерой или дробью, building и
   # structure — номера корпуса и строения. parent_guids — GUID элементов пути от субъекта до

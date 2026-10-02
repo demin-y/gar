@@ -112,6 +112,9 @@ module Gar
 
     attr_reader :path
 
+    # Archive из пути к zip; Archive (в том числе TestSupport::MemoryArchive) — как есть
+    def self.open(source) = source.is_a?(Archive) ? source : new(source)
+
     def initialize(path)
       raise ImportError, "Архив не найден: #{path}" unless File.file?(path)
 

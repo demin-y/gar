@@ -21,6 +21,8 @@ module Gar
     # После них соединение не годится для следующих запросов
     BROKEN_ERRORS = [PG::ConnectionBad, PG::UnableToSend].freeze
     ARRAY = PG::TextEncoder::Array.new
+    # Соединения, которые держат блокировку with_lock (для повторного входа)
+    HELD_LOCKS = ObjectSpace::WeakKeyMap.new
 
     @mutex       = Mutex.new
     @connections = ObjectSpace::WeakMap.new
@@ -61,22 +63,31 @@ module Gar
         conn.exec_params("SELECT n FROM unnest($1::text[]) n WHERE to_regclass(n) IS NOT NULL", [array(qualified_names)]).column_values(0)
       end
 
-      # Блокировка изменяющих операций (импорт, пути, переключение, очистка схем) на время блока:
-      # advisory lock сессии conn с ключом по config.database_schema. Повторный вход в той же
-      # сессии разрешён; занята другой сессией — LockedError. Блокировка снимается и при
-      # обрыве соединения
+      # Блокировка изменяющих операций (импорт, пути, переключение, очистка схем, дельты) на
+      # время блока: advisory lock сессии conn с ключом по config.database_schema; занята другой
+      # сессией — LockedError. Повторный вход в той же сессии к базе не обращается: вложенный
+      # вызов внутри транзакции не снимает блокировку в прерванной транзакции. Блокировка
+      # снимается и при обрыве соединения
       def with_lock(conn, operation)
+        return yield if HELD_LOCKS[conn]
+
         key = "gar:#{Gar.configuration.database_schema}"
         unless conn.exec_params("SELECT pg_try_advisory_lock(hashtext($1))", [key]).getvalue(0, 0) == "t"
           raise LockedError, "#{operation}: базу ГАР (схема #{Gar.configuration.database_schema}) уже изменяет другой процесс"
         end
 
+        HELD_LOCKS[conn] = true
         begin
           yield
         ensure
+          HELD_LOCKS.delete(conn)
           conn.exec_params("SELECT pg_advisory_unlock(hashtext($1))", [key]) unless conn.finished?
         end
       end
+
+      # Блок в транзакции conn; если она уже открыта — в ней же: вложенный BEGIN … COMMIT
+      # завершил бы внешнюю транзакцию раньше времени
+      def transaction(conn, &) = conn.transaction_status == PG::PQTRANS_INTRANS ? yield(conn) : conn.transaction(&)
 
       # Значение параметра-массива: $1::bigint[] и т. п.
       def array(values) = ARRAY.encode(values)

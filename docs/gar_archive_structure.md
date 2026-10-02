@@ -9,7 +9,8 @@ python3 examples/tools/gar_toc.py downloads/full_base/gar_xml_v20260116.zip 43 1
 python3 examples/tools/gar_toc.py '<GarXMLDeltaURL>' 43 11 --insecure   # дельта-архив
 ```
 
-Дельта-архив ещё не снят — сделать перед этапом 9 (`docs/rails_integration_plan.md`).
+Дельта-архив ещё не снят (из облачного окружения fias.nalog.ru недоступен). `Gar::Delta` (этап 9)
+исходит из того, что дельта устроена как полный архив; оглавление реальной дельты — сверить.
 
 ## Итог
 
