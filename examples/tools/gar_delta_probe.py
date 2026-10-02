@@ -12,7 +12,7 @@ Python 3.8+, без сторонних библиотек. Отчёт печат
 этот файл и нужно прислать. --insecure отключает проверку сертификата (у ФНС сертификат
 российского УЦ).
 """
-import argparse, datetime, io, json, re, ssl, zipfile, urllib.error, urllib.request
+import argparse, datetime, io, json, os, re, ssl, sys, traceback, zipfile, urllib.error, urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 
@@ -30,13 +30,15 @@ parser.add_argument("--source", nargs="+")
 parser.add_argument("--timeout", type=int, default=30)
 opts = parser.parse_args()
 CTX = ssl._create_unverified_context() if opts.insecure else None
-report = []
+REPORT = os.path.abspath("gar_delta_probe.txt")
+report = open(REPORT, "w", encoding="utf-8", buffering=1)  # построчно: файл виден и при прерывании
+print(f"Отчёт пишется в {REPORT}")
 
 
 def out(*parts):
     line = " ".join(str(p) for p in parts)
     print(line)
-    report.append(line)
+    report.write(line + "\n")
 
 
 def http(url, rng=None):
@@ -203,7 +205,9 @@ try:
             probe(source)
         except (OSError, zipfile.BadZipFile) as e:
             out(f"Не удалось прочитать {source}: {e}")
+except BaseException:
+    out(traceback.format_exc())  # любая ошибка или Ctrl+C — тоже в отчёт
+    sys.exit(1)
 finally:
-    with open("gar_delta_probe.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(report) + "\n")
-    print("\nОтчёт сохранён в gar_delta_probe.txt")
+    report.close()
+    print(f"\nОтчёт сохранён в {REPORT}")
