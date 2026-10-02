@@ -45,7 +45,7 @@ RSpec.describe Gar::Database do
       pids = Array.new(8) do
         Thread.new { Gar.with_connection { |conn| conn.exec("SELECT pg_sleep(0.05)") && backend_pid(conn) } }
       end.map(&:value)
-      results = Array.new(8) { Thread.new { search.search_address_objects("Зимняя").size } }.map(&:value)
+      results = Array.new(8) { Thread.new { search.search_address_objects("Воровского").size } }.map(&:value)
 
       expect(pids.uniq.size).to be_between(2, 3)
       expect(results.uniq).to eq([1])
@@ -115,12 +115,15 @@ RSpec.describe Gar::Database do
       expect(Gar.available?).to be(true)
     end
 
-    it "false без текущей схемы или без путей" do
+    it "false без текущей схемы или пока пути не построены" do
       schema = isolated_schema("gar_empty")
       db_connection.exec("CREATE SCHEMA #{schema}")
       db_connection.exec(Gar::Schema.fetch(:address_objects).create_sql(schema))
 
       Gar.configure { _1.database_schema = schema }
+      expect(Gar.available?).to be(false)
+      db_connection.exec("CREATE TABLE #{schema}.gar_meta AS SELECT * FROM gar.gar_meta")
+      db_connection.exec("UPDATE #{schema}.gar_meta SET status = 'imported'")
       expect(Gar.available?).to be(false)
       Gar.configure { _1.database_schema = "#{schema}_нет" }
       expect(Gar.available?).to be(false)

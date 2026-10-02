@@ -41,14 +41,14 @@ RSpec.describe Gar::Archive do
       jobs = archive.jobs(tables(:address_objects))
 
       expect(jobs.map(&:to_s)).to all(match(%r{\A\d{2}/AS_ADDR_OBJ_\d{8}_[-0-9a-f]+\.XML\z}))
-      expect(jobs.map(&:region_code)).to contain_exactly("43", "11", "77", "80")
+      expect(jobs.map(&:region_code)).to contain_exactly("43", "11", "50", "77", "80")
     end
 
     it "берёт справочники из корня, а таблицы субъектов — из папок, включая пустые" do
       jobs = archive.jobs(tables(:house_types, :houses))
 
       expect(table_and_region(jobs))
-        .to contain_exactly([:house_types, nil], [:houses, "43"], [:houses, "11"], [:houses, "77"], [:houses, "80"])
+        .to contain_exactly([:house_types, nil], [:houses, "43"], [:houses, "11"], [:houses, "50"], [:houses, "77"], [:houses, "80"])
     end
 
     it "с region_codes читает только папки этих субъектов и корень" do
@@ -58,13 +58,13 @@ RSpec.describe Gar::Archive do
     end
 
     it "с пустым списком субъектов читает все папки" do
-      expect(archive.jobs(tables(:houses), region_codes: []).size).to eq(4)
+      expect(archive.jobs(tables(:houses), region_codes: []).size).to eq(5)
     end
 
     it "ставит крупные файлы первыми и знает их несжатый размер" do
       jobs = archive.jobs(Gar::Schema::TABLES.values)
 
-      expect(jobs.size).to eq(10 + (18 * 4))
+      expect(jobs.size).to eq(10 + (18 * 5))
       expect(jobs.map(&:size)).to eq(jobs.map(&:size).sort.reverse)
       expect(jobs.first.size).to eq(archive.stream(jobs.first) { _1.read.bytesize })
     end
@@ -78,7 +78,7 @@ RSpec.describe Gar::Archive do
       jobs = archive.jobs(tables(:house_types, :houses))
 
       expect(table_and_region(jobs))
-        .to contain_exactly([:house_types, nil], [:houses, "43"], [:houses, "11"], [:houses, "77"], [:houses, "80"])
+        .to contain_exactly([:house_types, nil], [:houses, "43"], [:houses, "11"], [:houses, "50"], [:houses, "77"], [:houses, "80"])
     end
   end
 

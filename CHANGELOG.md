@@ -5,6 +5,30 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Тестовые данные (этап 5)
+
+**Несовместимые изменения**
+- `Gar.available?` проверяет `gar_meta.status = 'ready'` в текущей схеме (было — наличие
+  таблицы и полнотекстовых индексов путей): схема без `gar_meta` недоступна.
+- Удалены `spec/fixtures/*.sql`, `.devcontainer/db-test.Dockerfile` и
+  `examples/test_data_export.rb`; test-БД в docker-compose — чистый `postgres:17`.
+
+**Новое**
+- `Gar::TestSupport.load_fixtures(conn = nil, schema:)` (`require "gar/test_support"`, Т16):
+  связный набор `Gar::TestSupport::Sample` (Киров с домами `10а`, `10/2`, корпусами и
+  строениями, параметрами и закрытыми записями; Сыктывкар; Москва; цепочка из правил ФНС с
+  их OBJECTID) загружается тем же импортом, что и архив, с `gar_meta` и путями. Схема
+  заменяется одним переименованием и только если её создал `load_fixtures` или она пуста.
+  GUID объекта набора — `Sample.guid(objectid)`.
+- `Importer#import_full_base` принимает вместо пути объект с интерфейсом архива
+  (`TestSupport::MemoryArchive`) и `parallel:` (по умолчанию `config.parallel_import`).
+- `examples/benchmarks/generate_archive.rb` — синтетический архив заданного объёма,
+  `examples/benchmarks/import_and_search.rb` — время импорта, путей и p50/p95 поиска.
+
+**Исправлено**
+- Параллельный импорт через `Importer.new(conn)` открывал соединения воркеров по
+  `config.database_url`, а не к базе переданного соединения.
+
 ### Объём и данные (этап 4)
 
 **Несовместимые изменения**

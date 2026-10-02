@@ -118,11 +118,7 @@ class GarArchiveBuilder
   end
 
   def xml((root, item), records)
-    body = records.map { |record| "<#{item} #{attributes(record)} />" }.join
+    body = records.map { |record| "<#{item} #{Gar::TestSupport.xml_attributes(record)} />" }.join
     %(﻿<?xml version="1.0" encoding="utf-8"?><#{root}>#{body}</#{root}>)
-  end
-
-  def attributes(record)
-    record.filter_map { |key, value| "#{key}=#{value.to_s.encode(xml: :attr)}" unless value.nil? }.join(" ")
   end
 end

@@ -58,11 +58,10 @@ services:
     networks:
       - gar_network
 
-  # Test БД (порт 6433) - PostgreSQL 13
+  # Test БД (порт 6433) - PostgreSQL 17, как dev
+  # Данные спеки загружают сами (Gar::TestSupport.load_fixtures)
   db-test:
-    build:
-      context: .
-      dockerfile: .devcontainer/db-test.Dockerfile
+    image: postgres:17
     container_name: db_test
     environment:
       POSTGRES_DB: gar_db_test

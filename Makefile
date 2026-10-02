@@ -100,7 +100,7 @@ test-db-reset: ## Сбросить test БД (удалить volume и пере�
 	@echo "$(YELLOW)Сброс test БД...$(NC)"
 	@$(COMPOSE) $(COMPOSE_PROJECT) rm -f -s db-test
 	@docker volume rm -f gar_postgres_test_data 2>/dev/null || true
-	@echo "$(CYAN)Запуск свежей test БД (с fixtures)...$(NC)"
+	@echo "$(CYAN)Запуск свежей test БД...$(NC)"
 	@$(COMPOSE_TEST)
 	@echo "$(GREEN)Test БД сброшена!$(NC)"
 
@@ -146,7 +146,7 @@ db-info: ## Показать информацию о подключении к �
 	@echo "  URL: $(TEST_DB_URL)"
 	@echo "  Порт: 6433"
 	@echo "  База: gar_db_test"
-	@echo "  Fixtures: spec/fixtures/*.sql"
+	@echo "  Данные: Gar::TestSupport.load_fixtures при запуске спек (схема gar)"
 
 ##@ Тестирование и разработка
 
