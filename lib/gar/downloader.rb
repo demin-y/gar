@@ -17,6 +17,7 @@ module Gar
     include Loggable
 
     SECONDS_PER_DAY = 86_400
+    PROGRESS_STEP   = 1 << 20
     NETWORK_ERRORS  = [Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT,
                        Errno::EHOSTUNREACH, SocketError, EOFError, IOError, OpenSSL::SSL::SSLError].freeze
 
@@ -101,46 +102,56 @@ module Gar
       path
     end
 
-    # Дописывает part с текущего размера; сервер без Range отдаёт файл заново (200)
+    # Дописывает part с текущего размера; сервер без Range отдаёт файл заново (200). Если part
+    # не совпадает с файлом на сервере (416, размеры разные), он удаляется и загрузка идёт с нуля
     def fetch(uri, part, on_progress)
       offset  = file_size(part)
       request = Net::HTTP::Get.new(uri)
-      request["Range"] = "bytes=#{offset}-" if offset.positive?
-      logger.info "Продолжение загрузки с #{Utils.format_size(offset)}" if offset.positive?
+      if offset.positive?
+        request["Range"] = "bytes=#{offset}-"
+        logger.info "Продолжение загрузки с #{Utils.format_size(offset)}"
+      end
 
+      restart = false
       http(uri) do |connection|
         connection.request(request) do |response|
-          offset, total = start_body(response, part, offset)
-          next if offset.positive? && offset == total
+          # 416: part уже содержит весь файл (обрыв пришёлся на самый конец) или чужой
+          next restart = content_range_total(response) != offset if response.is_a?(Net::HTTPRangeNotSatisfiable)
 
-          File.open(part, offset.zero? ? "wb" : "ab") do |file|
-            on_progress&.call(offset, total, :download)
-            response.read_body do |chunk|
-              file.write(chunk)
-              offset += chunk.bytesize
-              on_progress&.call(offset, total, :download)
-            end
-          end
-          verify_size(offset, total)
+          write_body(response, part, offset, on_progress)
         end
       end
+      return unless restart
+
+      logger.warn "Недокачанный файл не совпадает с архивом на сервере: загрузка начнётся заново"
+      FileUtils.rm_f(part)
+      fetch(uri, part, on_progress)
     end
 
-    # Смещение, с которого пишется ответ, и полный размер файла (nil — неизвестен)
-    def start_body(response, part, offset)
+    # Пишет ответ в part; прогресс — не чаще раза на PROGRESS_STEP байт и в конце
+    def write_body(response, part, offset, on_progress)
       case response
-      when Net::HTTPPartialContent then [offset, content_range_total(response)]
-      when Net::HTTPOK             then [0, response.content_length]
-      when Net::HTTPRangeNotSatisfiable
-        # part уже содержит весь файл (обрыв пришёлся на самый конец) — иначе начинаем заново
-        total = content_range_total(response)
-        return [offset, offset] if total == offset
-
-        FileUtils.rm_f(part)
-        raise DownloadError, "Недокачанный файл не совпадает с архивом на сервере и удалён: запустите загрузку снова"
-      else
-        raise DownloadError, "Ошибка загрузки: #{response.code} #{response.message}"
+      when Net::HTTPPartialContent then total = content_range_total(response)
+      when Net::HTTPOK
+        offset = 0
+        total  = response.content_length
+      else raise DownloadError, "Ошибка загрузки: #{response.code} #{response.message}"
       end
+
+      reported = offset
+      on_progress&.call(offset, total, :download)
+      File.open(part, offset.zero? ? "wb" : "ab") do |file|
+        response.read_body do |chunk|
+          file.write(chunk)
+          offset += chunk.bytesize
+          next if offset - reported < PROGRESS_STEP
+
+          reported = offset
+          on_progress&.call(offset, total, :download)
+        end
+      end
+      on_progress&.call(offset, total, :download) if reported != offset
+      verify_size(offset, total)
     end
 
     def content_range_total(response)
@@ -182,8 +193,6 @@ module Gar
     end
 
     def file_size(path) = File.exist?(path) ? File.size(path) : 0
-
-    # Cleanup helpers
 
     def log_cleanup_start(directory, keep_days, keep_versions, dry_run)
       logger.info("Очистка старых файлов в: #{directory}")
@@ -258,10 +267,6 @@ module Gar
       base.sub(/\.zip$/, "_v#{version_id}.zip")
     end
 
-    def extract_version_from_filename(filepath)
-      filename = File.basename(filepath)
-      match = filename.match(/_v(\d+)\.zip$/)
-      match ? match[1].to_i : nil
-    end
+    def extract_version_from_filename(filepath) = File.basename(filepath)[/_v(\d+)\.zip\z/, 1]&.to_i
   end
 end

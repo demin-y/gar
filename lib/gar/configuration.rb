@@ -105,9 +105,10 @@ module Gar
       Schema::DICTIONARIES + (tables - skipped).map { Schema.fetch(_1) }
     end
 
-    # Логгер выбирается при первом обращении: так в Rails берётся уже настроенный Rails.logger.
-    # nil — по умолчанию (Rails.logger или $stdout), false — без логов
-    def logger = @logger ||= default_logger
+    # Логгер выбирается при каждом обращении: в Rails берётся текущий Rails.logger, даже если
+    # его заменили после настройки гема. nil — по умолчанию (Rails.logger или $stdout),
+    # false — без логов
+    def logger = @logger || default_logger
 
     def logger=(value)
       @logger = value == false ? Logger.new(File::NULL) : value
@@ -140,11 +141,8 @@ module Gar
     end
 
     def default_logger
-      if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
-        Rails.logger
-      else
-        Logger.new($stdout, level: Logger::INFO)
-      end
+      rails_logger = Rails.logger if defined?(Rails) && Rails.respond_to?(:logger)
+      rails_logger || (@stdout_logger ||= Logger.new($stdout, level: Logger::INFO))
     end
   end
 end

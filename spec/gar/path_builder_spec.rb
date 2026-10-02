@@ -65,12 +65,12 @@ RSpec.describe Gar::PathBuilder, :db do
     expect(paths(:address_objects, "full_mun_path").compact.size).to eq(5)
   end
 
-  it "сообщает прогресс по записям и возвращает число заполненных путей" do
+  it "сообщает прогресс по просмотренным записям и возвращает число записей с путём" do
     progress = []
 
-    expect(builder.build(on_progress: ->(*args) { progress << args })).to eq(12)
-    expect(progress.first).to eq([0, 16, :paths])
-    expect(progress.last).to eq([12, 16, :paths])
+    expect(builder.build(on_progress: ->(*args) { progress << args })).to eq(7)
+    expect(progress.first).to eq([0, 8, :paths])
+    expect(progress.last).to eq([8, 8, :paths])
   end
 
   it "заполняет только пустые пути: повторный запуск продолжает, а не пересобирает" do
@@ -88,8 +88,10 @@ RSpec.describe Gar::PathBuilder, :db do
 
     builder.build
 
-    expect(builder.passes.map(&:to_s)).to eq(["address_objects.full_adm_path", "houses.full_adm_path"])
+    expect(builder.hierarchies).to eq([:adm])
     expect(paths(:houses, "full_mun_path").values.uniq).to eq([nil])
+    expect(db_connection.exec_params("SELECT indexname FROM pg_indexes WHERE schemaname = $1", [schema]).column_values(0))
+      .to contain_exactly("idx_address_objects_full_adm_path_tsv", "idx_houses_full_adm_path_tsv")
   end
 
   it "ничего не строит без адресных объектов" do

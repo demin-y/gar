@@ -93,6 +93,16 @@ RSpec.describe Gar::Downloader do
       expect(File.read(zip)).to eq("0123456789")
     end
 
+    it "качает заново, если .part не совпадает с файлом на сервере" do
+      File.write("#{zip}.part", "лишние байты")
+      stub_request(:get, url).to_return(body: "0123456789")
+      stub_request(:get, url).with(headers: { "Range" => /bytes=/ }).to_return(status: 416, headers: { "Content-Range" => "bytes */10" })
+
+      downloader.download_full_base(version)
+
+      expect(File.read(zip)).to eq("0123456789")
+    end
+
     it "переименовывает .part, если он уже содержит весь файл" do
       File.write("#{zip}.part", "0123456789")
       stub_request(:get, url).to_return(status: 416, headers: { "Content-Range" => "bytes */10" })
