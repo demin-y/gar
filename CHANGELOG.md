@@ -5,6 +5,37 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Загрузка из приложения (этап 8)
+
+**Несовместимые изменения**
+- Импорт по умолчанию идёт в схему `<database_schema>_v<версия>` (было — `gar_v<версия>` при
+  любой `database_schema`), резервная — `<database_schema>_backup_v<версия>` (было —
+  `gar_backup_v<версия>` при любой `database_schema`).
+- `Importer#switch_to_imported_schema` оставляет резервных схем не больше
+  `config.keep_backups` (по умолчанию 1), остальные удаляет.
+- `Importer#import_full_base` не загружает схему заново, если она уже загружена (статус
+  `imported`/`ready`) из той же версии с теми же настройками, и возвращает её имя.
+- Прогресс импорта сообщает и этап `:indexes` (построено таблиц из всех); таблицы и субъекты
+  в `gar_meta` отсортированы.
+- `PathBuilder#build` отказывается строить пути схемы со статусом `importing`.
+- `Importer#find_latest_full_base_zip` заменён методом класса
+  `Importer.find_latest_full_base_zip(directory:)`.
+
+**Новое**
+- `Gar.download(version_id, on_progress:)`, `Gar.import(zip, region_codes:, on_progress:)`,
+  `Gar.build_paths(schema, on_progress:)`, `Gar.switch(schema, on_progress:)` — шаги загрузки
+  для фоновой задачи, каждый со своим соединением; повторный вызов пропускает сделанное;
+  `Gar.switch` переключает только готовую схему (Т12).
+- `Gar::LockedError`: импорт, пути, переключение и очистка держат advisory lock на
+  `config.database_schema`, скачивание — блокировку файла `<zip>.lock`.
+- `Gar.current_version` → `Gar::Meta` текущей схемы; `config.keep_backups`;
+  `Gar.cleanup_schemas(keep_backups:)` — удаляет лишние резервные и устаревшие схемы
+  импорта (Т13).
+- `Importer#import_full_base(reuse_current: true)` возвращает текущую схему, если она готова и
+  загружена из той же версии с теми же настройками.
+- `Gar::Schemas` — переименование, резервные схемы и очистка.
+- `examples/active_job_import.rb` — загрузка ActiveJob-задачей с прогрессом и отчётом.
+
 ### Перенос старых адресов (этап 7)
 
 **Несовместимые изменения**

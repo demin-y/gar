@@ -3,7 +3,7 @@
 require "parallel"
 
 module Gar
-  # Импорт архива ГАР в версионную схему gar_v<версия>.
+  # Импорт архива ГАР в версионную схему <config.database_schema>_v<версия> («gar_v20260116»).
   #
   # Схема создаётся заново (текущую импорт не трогает), таблицы — без ключей и индексов.
   # Файлы таблиц читаются потоком из zip одной очередью работ «таблица × субъект», крупные
@@ -20,66 +20,87 @@ module Gar
       @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
     end
 
-    # Возвращает имя схемы с данными. source — путь к zip или Archive (в том числе
-    # TestSupport::MemoryArchive). region_codes — коды субъектов (папки архива), по умолчанию
-    # config.region_codes, пустой список — все; on_progress — ->(done, total, stage): байты
-    # разобранного XML, stage = :import; parallel — параллельно ли загружать файлы и строить
-    # индексы (по умолчанию config.parallel_import). Ошибки базы и файлов приходят как
-    # ImportError; незавершённая схема (gar_meta.status = importing) остаётся до повторного
-    # импорта, который создаст её заново.
-    def import_full_base(source, schema: nil, region_codes: nil, on_progress: nil, parallel: Gar.configuration.parallel_import)
+    # Возвращает имя схемы с данными (по умолчанию <config.database_schema>_v<версия>). source —
+    # путь к zip или Archive (в том числе TestSupport::MemoryArchive). region_codes — коды
+    # субъектов (папки архива), по умолчанию config.region_codes, пустой список — все;
+    # on_progress — ->(done, total, stage): байты разобранного XML (stage = :import), затем
+    # таблицы с готовыми ключами и индексами (:indexes); parallel — параллельно ли загружать
+    # файлы и строить индексы (по умолчанию config.parallel_import).
+    #
+    # Повторный вызов безопасен: схема, уже загруженная из той же версии с теми же
+    # настройками (gar_meta.status imported или ready), не загружается заново; незавершённая
+    # (importing) или загруженная иначе создаётся заново. С reuse_current: если так загружена
+    # и готова (ready) текущая схема, возвращается она (Gar.import). Во время импорта база
+    # заблокирована для других изменяющих операций (LockedError). Ошибки базы и файлов —
+    # ImportError.
+    def import_full_base(source, schema: nil, region_codes: nil, on_progress: nil, parallel: Gar.configuration.parallel_import, reuse_current: false)
       archive      = open_archive(source)
       @parallel    = parallel
-      schema     ||= "gar_v#{archive.version_id}"
+      current      = Gar.configuration.database_schema
+      schema     ||= Schemas.import_name(current, archive.version_id)
       region_codes = region_codes.nil? ? Gar.configuration.region_codes : Configuration.region_codes(region_codes)
       tables       = Gar.configuration.import_tables
-      jobs         = archive.jobs(tables, region_codes:)
 
+      Database.with_lock(db_conn, "Импорт в схему #{schema}") do
+        next current if reuse_current && imported?(current, archive, region_codes, tables, statuses: ["ready"])
+        next schema if imported?(schema, archive, region_codes, tables, statuses: ["imported", "ready"])
+
+        import(archive, schema, region_codes, tables, on_progress)
+      end
+    rescue PG::Error, SystemCallError, IOError => e
+      raise ImportError, "Ошибка импорта в схему #{schema}: #{e.message}"
+    end
+
+    # Последний скачанный архив в directory (по умолчанию config.full_base_dir) или nil
+    def self.find_latest_full_base_zip(directory: nil)
+      Dir.glob(File.join(directory || Gar.configuration.full_base_dir, "*.zip")).max_by { File.mtime(_1) }
+    end
+
+    # Делает схему текущей (database_schema); прежняя текущая становится резервной
+    # <текущая>_backup_v<версия>, резервные сверх config.keep_backups удаляются (Schemas.switch).
+    # Переименования идут в одной транзакции: читатели видят либо старую, либо новую схему
+    def switch_to_imported_schema(new_schema_name)
+      raise ArgumentError, "Имя новой схемы не может быть пустым" if new_schema_name.to_s.empty?
+
+      current = Gar.configuration.database_schema
+      Database.with_lock(db_conn, "Переключение на схему #{new_schema_name}") do
+        raise ArgumentError, "Схема #{new_schema_name} не существует" unless Schemas.exists?(db_conn, new_schema_name)
+        next logger.info("Схема #{new_schema_name} уже текущая") if new_schema_name == current
+
+        Schemas.switch(db_conn, new_schema_name, current:, keep_backups: Gar.configuration.keep_backups)
+      end
+    end
+
+    private
+
+    def import(archive, schema, region_codes, tables, on_progress)
+      jobs = archive.jobs(tables, region_codes:)
       logger.info "Импорт ГАР версии #{archive.version_id} в схему #{schema}: #{jobs.size} файлов, #{Utils.format_size(jobs.sum(&:size))} XML"
       warn_missing_regions(jobs, region_codes)
       create_schema(schema, tables, archive:, region_codes:)
       load_data(archive, jobs, schema, on_progress)
       prune_hierarchies(schema, tables)
       loaded = jobs.group_by(&:table).transform_values { |table_jobs| table_jobs.sum(&:size) }
-      build_indexes(schema, tables.sort_by { -loaded.fetch(_1, 0) })
+      build_indexes(schema, tables.sort_by { -loaded.fetch(_1, 0) }, on_progress)
       # Статус пишется последним: схема в статусе importing — незавершённый импорт
       Meta.update(db_conn, schema, "imported")
       logger.info "Импорт завершён: схема #{schema}"
       schema
-    rescue PG::Error, SystemCallError, IOError => e
-      raise ImportError, "Ошибка импорта в схему #{schema}: #{e.message}"
     end
 
-    def find_latest_full_base_zip(directory: nil)
-      target_dir = directory || Gar.configuration.full_base_dir
-      return nil unless Dir.exist?(target_dir)
+    # Схема в статусе из statuses загружена из той же версии с теми же настройками
+    def imported?(schema, archive, region_codes, tables, statuses:)
+      meta = Meta.read(db_conn, schema)
+      return false unless statuses.include?(meta&.status) && meta.same_import?(archive.version_id, region_codes:, tables: tables.map(&:name))
 
-      Dir.glob(File.join(target_dir, "*.zip")).max_by { |f| File.mtime(f) }
+      logger.info "Схема #{schema} уже загружена из версии #{archive.version_id} с теми же настройками (#{meta.status}): импорт не нужен"
+      true
     end
-
-    # Делает схему текущей (database_schema); прежняя текущая становится резервной
-    # gar_backup_v<версия>. Переименования идут в одной транзакции: читатели видят либо
-    # старую, либо новую схему.
-    def switch_to_imported_schema(new_schema_name)
-      raise ArgumentError, "Имя новой схемы не может быть пустым" if new_schema_name.to_s.empty?
-      raise ArgumentError, "Схема #{new_schema_name} не существует" unless schema_exists?(new_schema_name)
-
-      current_schema = Gar.configuration.database_schema
-      return logger.info "Новая схема уже является текущей" if new_schema_name == current_schema
-
-      db_conn.transaction do
-        backup_current_schema(current_schema)
-        rename_schema(new_schema_name, current_schema)
-      end
-      logger.info "Новая схема установлена как текущая: #{current_schema}"
-    end
-
-    private
 
     def create_schema(schema, tables, archive:, region_codes:)
       raise ImportError, "Схема #{schema} — текущая (database_schema): импорт в неё запрещён" if schema == Gar.configuration.database_schema
 
-      logger.warn "Схема #{schema} осталась от прерванного импорта и будет создана заново" if schema_exists?(schema)
+      logger.warn "Схема #{schema} осталась от прерванного импорта или загружена иначе и будет создана заново" if Schemas.exists?(db_conn, schema)
       db_conn.transaction do |conn|
         conn.exec("DROP SCHEMA IF EXISTS #{quote(schema)} CASCADE")
         conn.exec("CREATE SCHEMA #{quote(schema)}")
@@ -148,9 +169,11 @@ module Gar
     end
 
     # Ключи и индексы после загрузки: так COPY не тратит время на их поддержку. Крупные
-    # таблицы первыми
-    def build_indexes(schema, tables)
-      each_on_server(tables) do |conn, table|
+    # таблицы первыми; прогресс — число готовых таблиц
+    def build_indexes(schema, tables, on_progress)
+      done = 0
+      on_progress&.call(done, tables.size, :indexes)
+      each_on_server(tables, finish: ->(*) { on_progress&.call(done += 1, tables.size, :indexes) }) do |conn, table|
         logger.info "  Ключи, индексы и статистика: #{table.name}"
         conn.transaction do
           set_work_memory(conn, "maintenance_work_mem")
@@ -186,14 +209,18 @@ module Gar
     end
 
     # Работа на сервере по таблицам (ключи, индексы, отбор иерархий): таблицы независимы, при
-    # parallel_import обрабатываются параллельно в потоках — каждый со своим соединением
-    def each_on_server(tables)
+    # parallel_import обрабатываются параллельно в потоках — каждый со своим соединением.
+    # finish вызывается после каждой таблицы по одному (Parallel — под своим мьютексом)
+    def each_on_server(tables, finish: nil)
       if @parallel && tables.size > 1
-        Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers) do |table|
+        Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers, finish:) do |table|
           with_worker_connection { |conn| yield conn, table }
         end
       else
-        tables.each { |table| yield db_conn, table }
+        tables.each do |table|
+          yield db_conn, table
+          finish&.call
+        end
       end
     end
 
@@ -224,25 +251,6 @@ module Gar
     def warn_missing_regions(jobs, region_codes)
       missing = region_codes - jobs.filter_map(&:region_code)
       logger.warn "В архиве нет папок субъектов: #{missing.join(', ')}" if missing.any?
-    end
-
-    def schema_exists?(schema_name)
-      db_conn.exec_params("SELECT 1 FROM pg_namespace WHERE nspname = $1", [schema_name]).ntuples.positive?
-    end
-
-    def rename_schema(old_name, new_name)
-      db_conn.exec("ALTER SCHEMA #{quote(old_name)} RENAME TO #{quote(new_name)}")
-    end
-
-    def backup_current_schema(current_schema)
-      return unless schema_exists?(current_schema)
-
-      version     = Meta.read(db_conn, current_schema)&.version_id
-      backup_name = "gar_backup_#{version ? "v#{version}" : Time.now.strftime('%Y%m%d_%H%M%S')}"
-
-      db_conn.exec("DROP SCHEMA IF EXISTS #{quote(backup_name)} CASCADE")
-      rename_schema(current_schema, backup_name)
-      logger.info "Текущая схема #{current_schema} переименована в #{backup_name}"
     end
 
     def quote(identifier) = Schema.quote(identifier)

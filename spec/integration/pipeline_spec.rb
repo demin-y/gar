@@ -90,7 +90,8 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       importer.import_full_base(zip_path)
       Gar.configuration.database_schema = import_schema
 
-      expect { importer.import_full_base(zip_path) }.to raise_error(Gar::ImportError, /текущая/)
+      expect(importer.import_full_base(zip_path, schema: import_schema)).to eq(import_schema) # та же загрузка: схема не нужна заново
+      expect { importer.import_full_base(zip_path, schema: import_schema, region_codes: ["43"]) }.to raise_error(Gar::ImportError, /текущая/)
       expect(table_count(import_schema, "houses")).to eq(12)
     end
 
@@ -200,7 +201,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
   describe "переключение схем" do
     let(:current_schema) { isolated_schema("gar_current") }
-    let(:backup_schema)  { "gar_backup_v20260116" }
+    let(:backup_schema)  { "#{current_schema}_backup_v20260116" }
 
     before do
       register_schema_for_cleanup(backup_schema)
@@ -211,7 +212,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       importer.switch_to_imported_schema(importer.import_full_base(zip_path))
 
       expect(schema_exists?(current_schema)).to be(true)
-      expect(schema_exists?(import_schema)).to be(false)
+      expect(schema_exists?("#{current_schema}_v20260116")).to be(false)
       expect(table_count(current_schema, "houses")).to eq(12)
     end
 

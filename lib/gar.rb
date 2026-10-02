@@ -4,6 +4,7 @@ require "pg"
 require "logger"
 require_relative "gar/version"
 require_relative "gar/errors"
+require_relative "gar/operations"
 
 module Gar
   autoload :Address,         "gar/results"
@@ -23,6 +24,7 @@ module Gar
   autoload :Importer,        "gar/importer"
   autoload :PathBuilder,     "gar/path_builder"
   autoload :Schema,          "gar/schema"
+  autoload :Schemas,         "gar/schemas"
   autoload :Search,          "gar/search"
   autoload :Serializable,    "gar/results"
   autoload :Suggestion,      "gar/results"

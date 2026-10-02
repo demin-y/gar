@@ -17,6 +17,8 @@ module Gar
                 :status, :imported_at, :paths_built_at, :gem_version)
 
   class Meta
+    include Serializable
+
     TABLE   = "gar_meta"
     COLUMNS = {
       version_id: "integer NOT NULL", version_date: "date NOT NULL", region_codes: "text[] NOT NULL", tables: "text[] NOT NULL",
@@ -25,6 +27,14 @@ module Gar
     }.map { |name, type| Schema::Column.new(name:, type:) }.freeze
     # Время каждой стадии: статус → колонка
     STAMPS = { "imported" => :imported_at, "ready" => :paths_built_at }.freeze
+
+    # Схема загружена (или загружается) так же, как загрузит импорт версии version_id по
+    # текущей конфигурации: её можно не загружать заново
+    def same_import?(version_id, region_codes:, tables:)
+      self.version_id == version_id && settings == self.class.settings(region_codes:, tables:)
+    end
+
+    def settings = self.class.normalize(region_codes:, tables:, param_types:, keep_history:, prune_hierarchy:)
 
     class << self
       # Сведения схемы; nil — схема без gar_meta (создана не импортом гема)
@@ -40,17 +50,29 @@ module Gar
       # Создаёт таблицу со строкой импорта архива (Archive) в статусе importing; настройки
       # берутся из конфигурации
       def create(conn, schema, archive:, region_codes:, tables:)
-        config = Gar.configuration
-        values = {
-          version_id: archive.version_id, version_date: archive.version_date.iso8601, region_codes: Database.array(region_codes),
-          tables: Database.array(tables.map(&:to_s)),
-          param_types: (Database.array(config.param_types) unless config.param_types == :all),
-          keep_history: Database.array(config.keep_history.map(&:to_s)), prune_hierarchy: config.prune_hierarchy,
+        settings = settings(region_codes:, tables:)
+        values   = {
+          version_id: archive.version_id, version_date: archive.version_date.iso8601,
+          **settings.transform_values { _1.is_a?(Array) ? Database.array(_1) : _1 },
           status: "importing", gem_version: VERSION
         }
         conn.exec("CREATE TABLE #{qualified(schema)} (#{COLUMNS.map(&:definition).join(', ')})")
         conn.exec_params("INSERT INTO #{qualified(schema)} (#{values.keys.join(', ')}) VALUES (#{(1..values.size).map { "$#{_1}" }.join(', ')})",
                          values.values)
+      end
+
+      # Настройки, с которыми импорт по текущей конфигурации загрузит субъекты region_codes и
+      # таблицы tables (как в gar_meta, списки отсортированы)
+      def settings(region_codes:, tables:)
+        config = Gar.configuration
+        normalize(region_codes:, tables:, param_types: (config.param_types unless config.param_types == :all),
+                  keep_history: config.keep_history, prune_hierarchy: config.prune_hierarchy)
+      end
+
+      # Настройки в одном виде для сравнения: таблицы — символы, списки отсортированы
+      def normalize(region_codes:, tables:, param_types:, keep_history:, prune_hierarchy:)
+        { region_codes: region_codes.sort, tables: tables.map(&:to_sym).sort,
+          param_types: param_types&.sort, keep_history: keep_history.sort, prune_hierarchy: }
       end
 
       # Переводит схему в статус imported или ready и отмечает время стадии; схему без gar_meta

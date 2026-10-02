@@ -20,8 +20,8 @@
 | 5 | Тестовые данные и `Gar::TestSupport` (Т16) | ✅ готов |
 | 6 | Поиск для формы (Т6–Т9), синонимы, ранжирование | ✅ готов |
 | 7 | Сопоставление старых адресов (Т10–Т11) | ✅ готов |
-| 8 | Загрузка из приложения и эксплуатация (Т12, Т13) | ⏳ следующий |
-| 9 | Дельты — обновление по крону | — |
+| 8 | Загрузка из приложения и эксплуатация (Т12, Т13) | ✅ |
+| 9 | Дельты — обновление по крону | ⏳ следующий |
 | 10 | Railtie и документация (Т15, Т18, Т19) | — |
 | 11 | Итоговое код-ревью и simplify | — |
 | 12 | (необязательный) Функции для наборов extended/full | — |
@@ -577,15 +577,15 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
   `OBJECTGUID = AOGUID`.
 
 ### Этап 8. Загрузка из приложения и эксплуатация (Т12, Т13)
-- [ ] `Gar.download`, `Gar.import(zip, region_codes:)`, `Gar.build_paths`, `Gar.switch` принимают
+- [x] `Gar.download`, `Gar.import(zip, region_codes:)`, `Gar.build_paths`, `Gar.switch` принимают
   `on_progress: ->(done, total, stage) {}`. В процессах прогресс приходит в родителя через
   `finish`.
-- [ ] В `lib/` только исключения гема: ни `exit`, ни `puts`/`print`.
-- [ ] Идемпотентность по `gar_meta.status`; текущую схему не удалять никогда.
-- [ ] Advisory lock на все изменяющие операции; при занятой блокировке — `Gar::LockedError`.
-- [ ] `Gar.current_version`; `config.keep_backups = 1` с очисткой после `switch`;
+- [x] В `lib/` только исключения гема: ни `exit`, ни `puts`/`print`.
+- [x] Идемпотентность по `gar_meta.status`; текущую схему не удалять никогда.
+- [x] Advisory lock на все изменяющие операции; при занятой блокировке — `Gar::LockedError`.
+- [x] `Gar.current_version`; `config.keep_backups = 1` с очисткой после `switch`;
   `Gar.cleanup_schemas`.
-- [ ] `examples/active_job_import.rb`.
+- [x] `examples/active_job_import.rb`.
 
 ### Этап 9. Дельты — периодическое обновление по крону
 - [ ] Перед этапом пользователь запускает `gar_toc.py` на `GarXMLDeltaURL`. Структура дельты
@@ -1135,3 +1135,47 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
   - этап 11: литера в автодополнении и `Gar.address` (хранимый нормализованный номер);
   - этап 12: связи `ADDR_OBJ_DIVISION` для недействующих улиц в `match_house`.
 - Дальше: этап 8.
+
+### 2026-10-02 — этап 8
+- PR этапа 7 слит, ветка обновлена merge-коммитом `release-2`.
+- Сделано:
+  - фасад `lib/gar/operations.rb` (Т12): `Gar.download(version_id, on_progress:)`,
+    `Gar.import(zip, region_codes:, on_progress:)` (без zip — последний в `full_base_dir`),
+    `Gar.build_paths(schema, on_progress:)`, `Gar.switch(schema, on_progress:)` (только схема
+    в статусе `ready`), `Gar.cleanup_schemas(keep_backups:)`, `Gar.current_version` (`Meta`
+    текущей схемы); каждый шаг открывает и закрывает своё соединение;
+  - прогресс: `:download` (байты), `:import` (байты XML), `:indexes` (таблицы, новая стадия),
+    `:paths` (записи), `:switch`; в процессах — через `finish` в родителе, при потоках — из
+    потоков импорта по одному;
+  - блокировки: `Database.with_lock` — `pg_try_advisory_lock(hashtext('gar:<database_schema>'))`
+    на импорт, пути, `invalidate`, переключение, очистку и `TestSupport.load_fixtures`;
+    скачивание — `flock` на `<zip>.lock`; занято — `Gar::LockedError`;
+  - идемпотентность по `gar_meta`: `Meta#same_import?` (версия + отсортированные субъекты,
+    таблицы, типы параметров, `keep_history`, `prune_hierarchy`); импорт пропускает схему
+    `imported`/`ready`, `Gar.import` (`reuse_current: true`) возвращает готовую текущую;
+    `build_paths` отказывается от схемы в статусе `importing`;
+  - `Gar::Schemas`: имена `<database_schema>_v<версия>` и `<database_schema>_backup_v<версия>`
+    (раньше префикс `gar_` был зашит), `switch`/`replace` — одна транзакция переименований,
+    `config.keep_backups = 1` — лишние резервные удаляются после переключения, `cleanup` —
+    плюс схемы импорта не новее текущей и прерванные; текущая не удаляется никогда;
+  - `examples/active_job_import.rb` (ActiveJob + отчёт `BackgroundRun`, `LockedError` —
+    «пропущено»), README «Загрузка из приложения», CHANGELOG.
+- Т13 без дельт: обновление — полный импорт нужных субъектов и `switch`; текущая схема
+  обслуживает поиск, пока новая загружается.
+- `/simplify` (4 ревью), применено: проверка «текущая уже загружена» перенесена из фасада в
+  `Importer#import_full_base(reuse_current:)` — под блокировку, архив открывается один раз;
+  без лишних `Schemas.exists?` перед `Meta.read`; `Schemas.cleanup` и `names_with_prefix`;
+  `Meta.normalize` — одна нормализация настроек для `gar_meta` и сравнения; `finish` без
+  обёртки; метод экземпляра `Importer#find_latest_full_base_zip` убран (есть метод класса);
+  отчёт примера — `Gar.current_version.as_json`.
+  Пропущено: проверка `ready` в `Importer#switch_to_imported_schema` (низкоуровневый API
+  остаётся разрешительным, строгий — `Gar.switch`); перенос переключения целиком из `Importer`
+  в `Schemas` и `find_latest_full_base_zip` в `Downloader` (переезд API без выигрыша сейчас —
+  на этап 11); версия из имени схемы вместо `Meta.read` в `backups` (схем единицы).
+- Итог: rspec — 322 примера, 0 падений; rubocop чист.
+- Заметки для следующих этапов:
+  - этап 9: дельта меняет текущую схему — `PathBuilder#invalidate` + `build` под той же
+    блокировкой (`with_lock` реентерабелен); `Gar.update!` — поверх фасада этапа 8;
+  - этап 10: Railtie может задать `on_progress` по умолчанию и rake-задачи поверх фасада;
+  - этап 11: решить судьбу `Importer#switch_to_imported_schema` (дублирует `Gar.switch`).
+- Дальше: этап 9.

@@ -64,6 +64,25 @@ RSpec.describe Gar::Downloader do
       expect(Dir.children(dir)).to eq([File.basename(zip)])
     end
 
+    it "Gar.download качает последнюю версию или заданную" do
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(body: version.to_json)
+      stub_request(:get, "#{api}/GetAllDownloadFileInfo").to_return(body: [version].to_json)
+      stub_request(:get, url).to_return(body: "0123456789")
+
+      expect(Gar.download).to eq(zip)
+      expect(Gar.download(20_260_116)).to eq(zip)
+      expect { Gar.download(1) }.to raise_error(Gar::DownloadError, /не найдена/)
+    end
+
+    it "второй процесс, пока первый качает архив, получает LockedError" do
+      File.open("#{zip}.lock", File::RDWR | File::CREAT) do |lock|
+        lock.flock(File::LOCK_EX)
+
+        expect { downloader.download_full_base(version) }.to raise_error(Gar::LockedError, /уже скачивает/)
+      end
+      expect(File.exist?(zip)).to be(false)
+    end
+
     it "скачивает дельту в delta_dir" do
       stub_request(:get, version["GarXMLDeltaURL"]).to_return(body: "delta")
 
