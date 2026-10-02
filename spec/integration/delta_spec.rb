@@ -153,6 +153,15 @@ RSpec.describe "Дельты", :db do
       expect(count(:gar_updates)).to eq(1)
     end
 
+    it "в транзакции приложения применяется в ней же и откатывается вместе с ней" do
+      zip = delta { _1.region("43", :addr_obj, street(4_300_010, "Свободы")) }
+
+      expect { db_connection.transaction { raise "откат приложения" if apply(zip) } }.to raise_error("откат приложения")
+
+      expect(value("SELECT name FROM #{current}.address_objects WHERE id = 4300010")).to eq("Ленина")
+      expect(Gar.current_version.version_id).to eq(20_260_116)
+    end
+
     it "прерванная дельта откатывается целиком" do
       zip =
         delta do |d|

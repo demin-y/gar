@@ -110,6 +110,24 @@ RSpec.describe Gar::Database do
     end
   end
 
+  describe ".with_lock", :db do
+    it "в транзакции приложения берёт блокировку на транзакцию: ошибка в блоке не теряется, блокировка снимается" do
+      conn  = described_class.create_connection
+      other = described_class.create_connection
+      expect { conn.transaction { described_class.with_lock(conn, "Проверка") { conn.exec("SELECT 1 / 0") } } }
+        .to raise_error(PG::DivisionByZero)
+      expect(described_class.with_lock(other, "Проверка") { :ok }).to eq(:ok)
+
+      conn.transaction do
+        described_class.with_lock(conn, "Проверка") { nil }
+        expect { described_class.with_lock(other, "Проверка") { nil } }.to raise_error(Gar::LockedError) # до конца транзакции
+      end
+      expect(described_class.with_lock(other, "Проверка") { :ok }).to eq(:ok)
+    ensure
+      [conn, other].each { _1&.close }
+    end
+  end
+
   describe "Gar.available?", :db do
     it "true, когда текущая схема есть и пути в ней построены" do
       expect(Gar.available?).to be(true)
@@ -135,6 +153,9 @@ RSpec.describe Gar::Database do
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       expect(Gar.available?).to be(false)
       expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be < Gar.configuration.connect_timeout
+      Gar.configure { _1.database_url = nil }
+      expect(Gar.available?).to be(false)
+      Gar.configure { _1.database_url = "postgresql://postgres@127.0.0.1:1/gar" }
       expect { Gar::Search.new.search_houses("Ленина") }.to raise_error(Gar::UnavailableError, /недоступна/)
     end
   end

@@ -12,7 +12,7 @@ module Gar
       # Делает schema текущей (current); прежняя текущая становится резервной. Затем удаляет
       # резервные сверх keep_backups — самые старые по версии. Возвращает удалённые схемы
       def switch(conn, schema, current:, keep_backups:)
-        backup = backup_name(conn, current) if exists?(conn, current)
+        backup = backup_name(conn, current, taken: schema) if exists?(conn, current)
         replace(conn, schema, current, backup:)
         Gar.logger.info "Схема #{schema} стала текущей (#{current})#{", прежняя — #{backup}" if backup}"
         drop(conn, backups(conn, current).drop(keep_backups))
@@ -46,13 +46,15 @@ module Gar
       # Схемы импорта текущей current (<текущая>_v<версия>), по имени
       def imports(conn, current) = names_with_prefix(conn, "#{current}_v").grep(/\A#{Regexp.escape(current)}_v\d+\z/).sort
 
-      # Схемы импорта (<текущая>_v<версия>) не новее текущей и незавершённые: их уже не
-      # переключат. Без gar_meta у текущей — только незавершённые
+      # Схемы импорта (<текущая>_v<версия>) старее текущей и незавершённые (прерванные: импорт
+      # держит блокировку, а очистка идёт под ней же): их уже не переключат. Схему той же версии
+      # не трогает — это повторный импорт с другими настройками, который ждёт переключения. Без
+      # gar_meta у текущей — только незавершённые
       def stale_imports(conn, current)
         version = Meta.read(conn, current)&.version_id
         imports(conn, current).select do |name|
           meta = Meta.read(conn, name)
-          meta && (meta.status == "importing" || (version && meta.version_id <= version))
+          meta && (meta.status == "importing" || (version && meta.version_id < version))
         end
       end
 
@@ -75,10 +77,12 @@ module Gar
 
       private
 
-      # Имя резервной схемы — по версии из gar_meta, без неё — по времени
-      def backup_name(conn, current)
+      # Имя резервной схемы — по версии из gar_meta, без неё или если это имя у схемы taken
+      # (возврат к резервной той же версии) — по времени
+      def backup_name(conn, current, taken: nil)
         version = Meta.read(conn, current)&.version_id
-        "#{current}_backup_#{version ? "v#{version}" : Time.now.strftime('%Y%m%d_%H%M%S')}"
+        name    = "#{current}_backup_v#{version}" if version
+        name && name != taken ? name : "#{current}_backup_#{Time.now.strftime('%Y%m%d_%H%M%S')}"
       end
 
       def names_with_prefix(conn, prefix)

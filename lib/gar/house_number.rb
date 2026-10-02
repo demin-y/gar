@@ -55,7 +55,7 @@ module Gar
         return unless digit?(tokens.first)
 
         number = with_letter(+tokens.shift, tokens)
-        number << tokens.shift(2).join if tokens[0] == "/" && digit?(tokens[1])
+        number << with_letter(tokens.shift(2).join, tokens) if tokens[0] == "/" && digit?(tokens[1])
         parts = parts(tokens) or return
         new(number:, **parts)
       end

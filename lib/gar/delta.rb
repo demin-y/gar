@@ -66,7 +66,7 @@ module Gar
           next
         end
 
-        db_conn.transaction { apply_changes(archive, meta, on_progress) }
+        Database.transaction(db_conn) { apply_changes(archive, meta, on_progress) }
         archive.version_id
       end
     rescue PG::Error, SystemCallError, IOError => e

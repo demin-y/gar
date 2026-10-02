@@ -42,7 +42,8 @@ module Gar
     def switch(schema, on_progress: nil) = with_operation_connection { switch_on(_1, schema, on_progress) }
 
     # Удаляет резервные схемы сверх keep_backups и схемы импорта, которые уже не станут
-    # текущими: незавершённые и не новее текущей. Текущую не трогает. Возвращает удалённые
+    # текущими: незавершённые и старее текущей (схема той же версии ждёт переключения).
+    # Текущую не трогает. Возвращает удалённые
     def cleanup_schemas(keep_backups: configuration.keep_backups) = with_operation_connection { cleanup_on(_1, keep_backups) }
 
     # Обновляет базу до последней выгрузки ФНС — точка входа для крона. Если текущая схема
