@@ -12,6 +12,13 @@ module Gar
   class Autocomplete
     # Сколько улиц текста просматривать на дома
     STREETS = 10
+    # Номер дома для сравнения с вводом — как HouseNumber.of_house: house_num_norm и литера из
+    # дополнительного номера типа «литера» («18» + литера «Б» → «18б»)
+    NUMBER =
+      ["h.house_num_norm", *{ "a1" => "add_num1", "a2" => "add_num2" }.map do |type, column|
+        "CASE WHEN lower(#{type}.name) = '#{HouseNumber::LETTER}' " \
+          "THEN translate(lower(h.#{column}), '#{HouseNumber::LATIN}', '#{HouseNumber::CYRILLIC}') ELSE '' END"
+      end].join(" || ")
 
     attr_reader :search
 
@@ -58,10 +65,11 @@ module Gar
           FROM #{sql.hierarchy_table} hier
           JOIN #{search.table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
           #{search.house_type_joins}
+          CROSS JOIN LATERAL (SELECT #{NUMBER} AS number) n
           WHERE hier.is_active AND hier.parent_obj_id = ANY(#{ids})
-            AND starts_with(h.house_num_norm, #{exact}) #{parts.join(' ')}
-          ORDER BY h.house_num_norm = #{exact} DESC, (h.add_num1 IS NULL AND h.add_num2 IS NULL) DESC,
-                   array_position(#{ids}, hier.parent_obj_id), length(h.house_num_norm), h.house_num_norm, h.add_num1, h.add_num2
+            AND starts_with(n.number, #{exact}) #{parts.join(' ')}
+          ORDER BY n.number = #{exact} DESC, (h.add_num1 IS NULL AND h.add_num2 IS NULL) DESC,
+                   array_position(#{ids}, hier.parent_obj_id), length(n.number), n.number, h.add_num1, h.add_num2
           LIMIT #{sql.bind(limit)}
         SQL
       end

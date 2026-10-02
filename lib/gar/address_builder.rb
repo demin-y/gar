@@ -14,7 +14,7 @@ module Gar
   # предка. Без таблиц параметров эти поля — nil.
   class AddressBuilder
     LEVELS = { district: [2, 3], city: [5, 6], street: [7, 8] }.freeze
-    PARAMS = { postal_code: Search::POSTAL_CODE_PARAM, okato: 6, oktmo: 7 }.freeze
+    PARAMS = { postal_code: Schema::POSTAL_CODE_PARAM, okato: 6, oktmo: 7 }.freeze
     OFFICIAL_NAME = 16
     OFFICIAL_LEVELS = [1, 3, 4].freeze
     HOUSE_LEVEL = 10

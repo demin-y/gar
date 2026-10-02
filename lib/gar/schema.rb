@@ -12,7 +12,20 @@ module Gar
   module Schema
     SQL_TYPES = [:bigint, :integer, :text, :date, :boolean, :uuid, :tsvector].freeze
 
+    # Тип параметра «почтовый индекс» (PARAM TYPEID): по нему частичный индекс таблиц параметров
+    POSTAL_CODE_PARAM = 5
+
     def self.quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
+
+    # Таблица или индекс name схемы schema: "schema"."name"
+    def self.qualify(schema, name) = "#{quote(schema)}.#{quote(name)}"
+
+    # Типы дома house_alias: основной (ht) и дополнительные (a1, a2) — краткие и полные имена
+    def self.house_type_joins(schema, house_alias)
+      "LEFT JOIN #{qualify(schema, :house_types)} ht ON ht.id = #{house_alias}.house_type " \
+        "LEFT JOIN #{qualify(schema, :add_house_types)} a1 ON a1.id = #{house_alias}.add_type1 " \
+        "LEFT JOIN #{qualify(schema, :add_house_types)} a2 ON a2.id = #{house_alias}.add_type2"
+    end
 
     # type — тип SQL; у производной колонки может быть с условием (GENERATED ALWAYS AS …)
     Column =
@@ -35,7 +48,7 @@ module Gar
     Table =
       Data.define(:name, :file, :element, :regional, :region_code, :columns, :derived,
                   :primary_key, :indexes, :actual, :ignored) do
-        def qualified_name(schema) = "#{Schema.quote(schema)}.#{Schema.quote(name)}"
+        def qualified_name(schema) = Schema.qualify(schema, name)
 
         # Колонки, которые заполняет COPY, — в порядке значений строки XmlReader
         def copy_columns = region_code ? [*columns, REGION_CODE] : columns
@@ -176,11 +189,11 @@ module Gar
         table(name, file, element, region_code: true, actual: ACTUAL_RECORD) { object_record(&columns) }
       end
 
-      # postal_code — индекс по почтовому индексу (тип 5) для поиска по нему
+      # postal_code — индекс по почтовому индексу (POSTAL_CODE_PARAM) для поиска по нему
       def params_table(name, file, postal_code: false)
         table(name, file, "PARAM", actual: CURRENT_PARAM) do
           param
-          index :postal_code, "(value) WHERE type_id = 5" if postal_code
+          index :postal_code, "(value) WHERE type_id = #{POSTAL_CODE_PARAM}" if postal_code
         end
       end
     end

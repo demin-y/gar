@@ -82,7 +82,7 @@ module Gar
     end
 
     # Таблицы с путями
-    def tables = Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
+    def tables = @tables ||= Schema::REGIONAL.select(&:paths?).map(&:name).select { table_exists?(_1) }
 
     # Загруженные иерархии
     def hierarchies = @hierarchies ||= Configuration::HIERARCHY_TABLES.select { table_exists?(_2) }.keys
@@ -91,11 +91,10 @@ module Gar
 
     def build_paths(batch_size, on_progress)
       raise ConfigurationError, "В схеме #{schema} нет адресных объектов: пути строить не из чего" unless table_exists?(:address_objects)
-      raise ImportError, "Импорт в схему #{schema} не завершён: пути строятся после него" if Meta.read(db_conn, schema)&.status == "importing"
+      raise ImportError, "Импорт в схему #{schema} не завершён: пути строятся после него" if Meta.read(db_conn, schema)&.importing?
       raise ConfigurationError, "В схеме #{schema} нет ни одной иерархии (adm_hierarchy, mun_hierarchy)" if hierarchies.empty?
 
-      tables      = self.tables
-      pending     = tables.to_h { [_1, db_conn.exec("SELECT count(*) FROM #{qualified(_1)} WHERE #{empty_condition(hierarchies)}").getvalue(0, 0).to_i] }
+      pending     = tables.to_h { [_1, db_conn.exec("SELECT count(*) FROM #{qualified(_1)} WHERE #{empty_condition}").getvalue(0, 0).to_i] }
       total       = pending.values.sum
       done        = 0
       updated     = 0
@@ -104,22 +103,22 @@ module Gar
 
       tables.each do |table|
         logger.info "Заполнение путей #{table} (#{hierarchies.join(', ')}): #{pending[table]} записей, батч #{batch_size}"
-        updated += fill(table, hierarchies, batch_size) { on_progress&.call(done + _1, total, :paths) }
+        updated += fill(table, batch_size) { on_progress&.call(done + _1, total, :paths) }
         done    += pending[table]
-        create_path_indexes(table, hierarchies)
+        create_path_indexes(table)
       end
       update_ranks if tables.include?(:houses)
-      Meta.update(db_conn, schema, "ready")
+      Meta.update(db_conn, schema, Meta::READY)
       updated
     end
 
     # Батчи по id с временным частичным индексом по пустым путям; блок получает число
     # просмотренных записей. Курсор id пропускает записи, путь которых не собрался
-    def fill(table, hierarchies, batch_size)
+    def fill(table, batch_size)
       updated = 0
-      with_empty_paths_index(table, hierarchies) do
+      with_empty_paths_index(table) do
         updated =
-          each_batch(batch_sql(table, hierarchies), batch_size) do |seen, batch|
+          each_batch(batch_sql(table), batch_size) do |seen, batch|
             yield seen
             vacuum(table) if (batch % VACUUM_EVERY_N_BATCHES).zero?
           end
@@ -154,7 +153,7 @@ module Gar
         db_conn.exec_params("WITH r AS (UPDATE #{qualified(table)} SET #{reset_paths} WHERE #{subtree} RETURNING id) " \
                             "INSERT INTO #{scope} SELECT id FROM r", [ids])
         db_conn.exec("ANALYZE #{scope}")
-        each_batch(batch_sql(table, hierarchies, scope), BATCH_SIZE).tap { add_ancestors("id IN (SELECT id FROM #{scope})", [], only: table) }
+        each_batch(batch_sql(table, scope), BATCH_SIZE).tap { add_ancestors("id IN (SELECT id FROM #{scope})", [], only: table) }
       end
     end
 
@@ -189,7 +188,7 @@ module Gar
     # меняются. Возвращает последний id батча (курсор, NULL — записей больше нет), число
     # просмотренных и обновлённых записей. scope — временная таблица id (rebuild): батчи идут по
     # ней, а не по пустым путям всей таблицы
-    def batch_sql(table, hierarchies, scope = nil)
+    def batch_sql(table, scope = nil)
       house  = table == :houses
       cursor = scope ? "s.id" : "t.id"
       paths =
@@ -210,8 +209,8 @@ module Gar
         WITH batch AS (
           SELECT t.id, t.object_id, #{house ? "#{HOUSE_NUMBER} AS number" : 'NULL AS number'}
           FROM #{scope ? "#{scope} s JOIN #{qualified(table)} t ON t.id = s.id" : "#{qualified(table)} t"}
-          #{house_type_joins if house}
-          WHERE #{cursor} > $1#{" AND (#{empty_condition(hierarchies)})" unless scope}
+          #{Schema.house_type_joins(schema, 't') if house}
+          WHERE #{cursor} > $1#{" AND (#{empty_condition})" unless scope}
           ORDER BY #{cursor}
           LIMIT $2
         ),
@@ -230,12 +229,6 @@ module Gar
         )
         SELECT (SELECT max(id) FROM batch) AS last_id, (SELECT count(*) FROM batch) AS seen, (SELECT count(*) FROM updated) AS updated
       SQL
-    end
-
-    def house_type_joins
-      "LEFT JOIN #{qualified(:house_types)} ht ON ht.id = t.house_type " \
-        "LEFT JOIN #{qualified(:add_house_types)} a1 ON a1.id = t.add_type1 " \
-        "LEFT JOIN #{qualified(:add_house_types)} a2 ON a2.id = t.add_type2"
     end
 
     def update_columns(hierarchy)
@@ -292,11 +285,11 @@ module Gar
       "SELECT unnest(#{paths[0]}) UNION ALL SELECT m FROM unnest(#{paths[1]}) m WHERE m <> ALL(COALESCE(#{paths[0]}, '{}'))"
     end
 
-    def empty_condition(hierarchies) = hierarchies.map { "full_#{_1}_path IS NULL" }.join(" OR ")
+    def empty_condition = hierarchies.map { "full_#{_1}_path IS NULL" }.join(" OR ")
 
-    def with_empty_paths_index(table, hierarchies)
+    def with_empty_paths_index(table)
       index = "idx_#{table}_empty_paths_tmp"
-      db_conn.exec("CREATE INDEX IF NOT EXISTS #{Schema.quote(index)} ON #{qualified(table)} (id) WHERE #{empty_condition(hierarchies)}")
+      db_conn.exec("CREATE INDEX IF NOT EXISTS #{Schema.quote(index)} ON #{qualified(table)} (id) WHERE #{empty_condition}")
       yield
     ensure
       db_conn.exec("DROP INDEX IF EXISTS #{qualified(index)}")
@@ -309,11 +302,10 @@ module Gar
 
     # GIN-индексы по OBJECTID и tsvector путей; память на построение — import_maintenance_work_mem.
     # Индексы tsvector — признак построенных путей для Gar.available?
-    def create_path_indexes(table, hierarchies)
+    def create_path_indexes(table)
       logger.info "Индексы путей: #{table}"
-      memory = Gar.configuration.import_maintenance_work_mem
       db_conn.transaction do |conn|
-        conn.exec("SET LOCAL maintenance_work_mem TO #{conn.escape_literal(memory)}") if memory
+        Database.set_work_memory(conn, "maintenance_work_mem")
         hierarchies.each do |hierarchy|
           create_index(conn, table, "#{hierarchy}_path_ids")
           create_index(conn, table, "full_#{hierarchy}_path_tsv", "WHERE is_active")
@@ -327,6 +319,6 @@ module Gar
 
     def table_exists?(name) = Database.relation_exists?(db_conn, qualified(name))
 
-    def qualified(name) = "#{Schema.quote(schema)}.#{Schema.quote(name)}"
+    def qualified(name) = Schema.qualify(schema, name)
   end
 end

@@ -21,12 +21,9 @@ module Gar
         regions.each { |code, tables| tables.each { |name, records| add(code, name, records) } }
       end
 
-      def stream(item)
-        entry = item.is_a?(Job) ? item.entry : item
-        yield StringIO.new(@xml.fetch(entry.name))
-      end
-
       private
+
+      def open_entry(entry) = yield(StringIO.new(@xml.fetch(entry.name)))
 
       attr_reader :entries
 

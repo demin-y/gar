@@ -85,7 +85,8 @@ RSpec.describe "Загрузка из приложения", :db do
       db_connection.exec("CREATE SCHEMA #{current}_backup_old")
       load_current
       load_current(region_codes: ["43"]) # прежняя текущая — резервная
-      stale = Gar.import(zip_path)       # загружена, но не новее текущей
+      stale = Gar.import(zip_path)       # загружена, но старее текущей
+      db_connection.exec("UPDATE #{current}.gar_meta SET version_id = 20260120")
 
       status = Gar.status
       expect(status.current).to have_attributes(name: current, meta: have_attributes(region_codes: ["43"]), size: be_positive)
@@ -97,6 +98,27 @@ RSpec.describe "Загрузка из приложения", :db do
       expect(dropped).to contain_exactly("#{current}_backup_old", stale)
       expect(Gar::Schemas.backups(db_connection, current)).to eq(["#{current}_backup_v20260116"])
       expect(Gar.current_version).to have_attributes(status: "ready")
+    end
+
+    it "не удаляет схему импорта той же версии с другими настройками: она ждёт переключения" do
+      load_current(region_codes: ["43"])
+      pending_switch = Gar.import(zip_path, region_codes: ["43", "11"])
+
+      expect(Gar.cleanup_schemas).to eq([])
+      expect(Gar::Schemas.exists?(db_connection, pending_switch)).to be(true)
+    end
+
+    it "возврат к резервной схеме той же версии сохраняет обе: прежняя текущая получает имя по времени" do
+      load_current(region_codes: ["43"])
+      load_current(region_codes: ["43", "11"]) # прежняя текущая — gar_backup_v20260116
+      Gar.configuration.keep_backups = 2
+
+      Gar.switch("#{current}_backup_v20260116")
+
+      expect(Gar.current_version.region_codes).to eq(["43"])
+      backups = Gar::Schemas.backups(db_connection, current)
+      expect(backups).to contain_exactly(match(/\A#{current}_backup_\d{8}_\d{6}\z/))
+      expect(Gar::Meta.read(db_connection, backups.first).region_codes).to eq(["11", "43"])
     end
 
     it "не удаляет схему импорта новее текущей" do

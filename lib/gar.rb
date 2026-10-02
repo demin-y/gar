@@ -76,10 +76,11 @@ module Gar
     def with_connection(&) = Database.with_connection(&)
 
     # База доступна и готова к поиску: в текущей схеме импорт завершён и пути построены
-    # (gar_meta.status = ready). Хватает права SELECT; ошибка соединения или прав — false
+    # (gar_meta.status = ready). Хватает права SELECT; ошибка соединения или прав и не заданный
+    # адрес базы — false
     def available?
-      with_connection { |conn| Meta.read(conn, configuration.database_schema)&.status == "ready" }
-    rescue UnavailableError, PG::Error => e
+      with_connection { |conn| Meta.read(conn, configuration.database_schema)&.ready? || false }
+    rescue UnavailableError, ConfigurationError, PG::Error => e
       logger.warn "База ГАР недоступна: #{e.message.strip}"
       false
     end

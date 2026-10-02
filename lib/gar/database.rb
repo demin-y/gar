@@ -66,13 +66,16 @@ module Gar
       # Блокировка изменяющих операций (импорт, пути, переключение, очистка схем, дельты) на
       # время блока: advisory lock сессии conn с ключом по config.database_schema; занята другой
       # сессией — LockedError. Повторный вход в той же сессии к базе не обращается: вложенный
-      # вызов внутри транзакции не снимает блокировку в прерванной транзакции. Блокировка
+      # вызов внутри транзакции не снимает блокировку в прерванной транзакции. Если conn уже в
+      # транзакции (её открыло приложение), блокировка берётся на транзакцию и снимается при её
+      # COMMIT или ROLLBACK — снять её запросом в прерванной транзакции нельзя. Блокировка
       # снимается и при обрыве соединения
       def with_lock(conn, operation)
         return yield if HELD_LOCKS[conn]
 
-        key = "gar:#{Gar.configuration.database_schema}"
-        unless conn.exec_params("SELECT pg_try_advisory_lock(hashtext($1))", [key]).getvalue(0, 0) == "t"
+        key  = "gar:#{Gar.configuration.database_schema}"
+        xact = conn.transaction_status == PG::PQTRANS_INTRANS
+        unless conn.exec_params("SELECT pg_try_advisory#{'_xact' if xact}_lock(hashtext($1))", [key]).getvalue(0, 0) == "t"
           raise LockedError, "#{operation}: базу ГАР (схема #{Gar.configuration.database_schema}) уже изменяет другой процесс"
         end
 
@@ -81,7 +84,7 @@ module Gar
           yield
         ensure
           HELD_LOCKS.delete(conn)
-          conn.exec_params("SELECT pg_advisory_unlock(hashtext($1))", [key]) unless conn.finished?
+          conn.exec_params("SELECT pg_advisory_unlock(hashtext($1))", [key]) unless xact || conn.finished?
         end
       end
 
@@ -91,6 +94,14 @@ module Gar
 
       # Значение параметра-массива: $1::bigint[] и т. п.
       def array(values) = ARRAY.encode(values)
+
+      # Память сервера на операцию в текущей транзакции (setting — maintenance_work_mem или
+      # work_mem) — config.import_maintenance_work_mem на каждый воркер; без настройки
+      # действует значение сервера
+      def set_work_memory(conn, setting)
+        memory = Gar.configuration.import_maintenance_work_mem
+        conn.exec("SET LOCAL #{setting} TO #{conn.escape_literal(memory)}") if memory
+      end
 
       # Закрывает соединения пула; следующий with_connection создаст новый
       def disconnect!
