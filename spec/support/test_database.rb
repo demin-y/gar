@@ -3,8 +3,8 @@
 require "pg"
 require "securerandom"
 
-# Тестовая БД нужна только примерам с тегом :db — она подключается лениво,
-# и unit-тесты работают без PostgreSQL.
+# Тестовая БД нужна только примерам с тегом :db — spec_helper готовит её один раз и только
+# если такие примеры загружены, поэтому unit-тесты работают без PostgreSQL.
 module TestDatabase
   FIXTURES_DIR = File.expand_path("../fixtures", __dir__)
 
@@ -15,16 +15,17 @@ module TestDatabase
 
     def connection
       @connection = nil if @connection&.finished?
-      @connection ||= PG.connect(url)
+      @connection ||= PG.connect(url).tap { |conn| conn.set_notice_processor { nil } }
     end
 
-    # Один раз за прогон: проверяет соединение и заливает фикстуры в схему gar
+    # База тестовая и целиком наша: удаляем схемы, оставшиеся от прерванных прогонов,
+    # и заливаем фикстуры в схему gar
     def prepare!
-      return if @prepared
-
-      connection.exec("SELECT 1")
+      drop_schemas(connection.exec(<<~SQL).column_values(0))
+        SELECT nspname FROM pg_namespace
+        WHERE nspname NOT LIKE 'pg\\_%' AND nspname NOT IN ('public', 'information_schema')
+      SQL
       load_fixtures
-      @prepared = true
     rescue PG::ConnectionBad => e
       raise "Тестовая БД недоступна (#{url}): #{e.message.strip}\n" \
             "Запустите bin/setup_test_db (или make test-db-up) либо задайте TEST_DATABASE_URL."
@@ -45,7 +46,6 @@ module TestDatabase
     def load_fixtures
       conn = PG.connect(url)
       conn.set_notice_processor { nil }
-      conn.exec("DROP SCHEMA IF EXISTS gar CASCADE")
       conn.exec(File.read(File.join(FIXTURES_DIR, "schema.sql")))
       conn.exec(File.read(File.join(FIXTURES_DIR, "data.sql")))
     ensure
@@ -59,7 +59,7 @@ module TestDatabase
     end
 
     # Уникальное имя схемы; схема удаляется после примера
-    def isolated_schema(prefix = "gar_test")
+    def isolated_schema(prefix)
       register_schema_for_cleanup("#{prefix}_#{SecureRandom.hex(4)}")
     end
 

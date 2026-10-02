@@ -11,17 +11,17 @@
 module GarSampleArchive
   module_function
 
-  DATES   = { "UPDATEDATE" => "2024-01-01", "STARTDATE" => "2024-01-01", "ENDDATE" => "2079-06-06" }.freeze
-  ACTUAL  = { "ISACTUAL" => "1", "ISACTIVE" => "1" }.freeze
-  VERSION = "2026.01.16"
+  DATES      = { "UPDATEDATE" => "2024-01-01", "STARTDATE" => "2024-01-01", "ENDDATE" => "2079-06-06" }.freeze
+  ACTUAL     = { "ISACTUAL" => "1", "ISACTIVE" => "1" }.freeze
+  DICTIONARY = { **DATES, "ISACTIVE" => "true" }.freeze
 
   # OBJECTID → GUID: детерминированные, чтобы тесты могли их проверять
   def guid(object_id)
     format("00000000-0000-4000-8000-%012d", object_id)
   end
 
-  def build(version: VERSION)
-    builder = GarArchiveBuilder.new(version:)
+  def build
+    builder = GarArchiveBuilder.new
     add_dictionaries(builder)
     add_kirov(builder)
     add_komi(builder)
@@ -33,30 +33,22 @@ module GarSampleArchive
     builder.root(:object_levels,
                  *{ 1 => "Субъект РФ", 3 => "Муниципальный район", 5 => "Город",
                     8 => "Элемент улично-дорожной сети", 10 => "Здание (строение), сооружение" }
-                   .map { |level, name| { "LEVEL" => level, "NAME" => name, **DATES, "ISACTIVE" => "true" } })
+                   .map { |level, name| { "LEVEL" => level, "NAME" => name, **DICTIONARY } })
 
     builder.root(:addr_obj_types,
                  *[[1, 1, "обл", "Область"], [2, 1, "респ", "Республика"], [3, 1, "г", "Город"],
                    [4, 3, "г.о.", "Городской округ"], [5, 5, "г", "Город"], [6, 8, "ул", "Улица"]]
-                   .map do |id, level, short, name|
-                     { "ID" => id, "LEVEL" => level, "SHORTNAME" => short, "NAME" => name, "DESC" => name, **DATES, "ISACTIVE" => "true" }
-                   end)
+                   .map { |id, level, short, name| { "ID" => id, "LEVEL" => level, **type_attributes(short, name) } })
 
-    builder.root(:house_types,
-                 { "ID" => 2, "NAME" => "Дом", "SHORTNAME" => "д.", "DESC" => "Дом", **DATES, "ISACTIVE" => "true" },
-                 { "ID" => 5, "NAME" => "Здание", "SHORTNAME" => "зд.", "DESC" => "Здание", **DATES, "ISACTIVE" => "true" })
-
-    builder.root(:addhouse_types,
-                 { "ID" => 1, "NAME" => "Корпус", "SHORTNAME" => "к.", "DESC" => "Корпус", **DATES, "ISACTIVE" => "true" },
-                 { "ID" => 2, "NAME" => "Строение", "SHORTNAME" => "стр.", "DESC" => "Строение", **DATES, "ISACTIVE" => "true" })
+    builder.root(:house_types, *{ 2 => ["д.", "Дом"], 5 => ["зд.", "Здание"] }.map { |id, names| { "ID" => id, **type_attributes(*names) } })
+    builder.root(:addhouse_types, *{ 1 => ["к.", "Корпус"], 2 => ["стр.", "Строение"] }.map { |id, names| { "ID" => id, **type_attributes(*names) } })
 
     builder.root(:param_types,
                  *{ 5 => "Почтовый индекс", 6 => "ОКАТО", 7 => "OKTMO", 16 => "Официальное наименование" }
-                   .map { |id, name| { "ID" => id, "NAME" => name, "DESC" => name, "CODE" => "C#{id}", "ISACTIVE" => "true", **DATES } })
+                   .map { |id, name| { "ID" => id, "NAME" => name, "DESC" => name, "CODE" => "C#{id}", **DICTIONARY } })
   end
 
   def add_kirov(builder)
-    region = "43"
     objects = [
       [4_300_001, "Кировская", "обл", 1],
       [4_300_002, "город Киров", "г.о.", 3],
@@ -64,12 +56,6 @@ module GarSampleArchive
       [4_300_010, "Ленина", "ул", 8],
       [4_300_011, "Воровского", "ул", 8]
     ]
-    builder.region(region, :addr_obj, *objects.map { |id, name, type, level| address_object(id, name, type, level) })
-    # Историческая запись улицы Воровского: прежнее название «Старая»
-    builder.region(region, :addr_obj,
-                   address_object(4_300_011, "Старая", "ул", 8, "ID" => 9_300_011, "ISACTUAL" => "0", "ISACTIVE" => "0",
-                                                                          "ENDDATE" => "2020-01-01", "NEXTID" => 4_300_011))
-
     houses = [
       house(4_300_101, "10"),
       house(4_300_102, "10а"),
@@ -80,56 +66,49 @@ module GarSampleArchive
       house(4_300_107, "16", "ISACTIVE" => "0"),
       house(4_300_201, "5")
     ]
-    builder.region(region, :houses, *houses)
+    # Административная иерархия: город сразу под областью; муниципальная — через городской округ
+    adm = { 4_300_003 => 4_300_001, 4_300_010 => 4_300_003, 4_300_011 => 4_300_003 }
+    houses.each { |record| adm[record["OBJECTID"]] = record["OBJECTID"] == 4_300_201 ? 4_300_011 : 4_300_010 }
+    mun = adm.merge(4_300_002 => 4_300_001, 4_300_003 => 4_300_002)
 
-    street_of = ->(house_id) { house_id == 4_300_201 ? 4_300_011 : 4_300_010 }
-    adm = { 4_300_001 => [4_300_001], 4_300_003 => [4_300_001, 4_300_003],
-            4_300_010 => [4_300_001, 4_300_003, 4_300_010], 4_300_011 => [4_300_001, 4_300_003, 4_300_011] }
-    mun = { 4_300_001 => [4_300_001], 4_300_002 => [4_300_001, 4_300_002], 4_300_003 => [4_300_001, 4_300_002, 4_300_003],
-            4_300_010 => [4_300_001, 4_300_002, 4_300_003, 4_300_010], 4_300_011 => [4_300_001, 4_300_002, 4_300_003, 4_300_011] }
-    houses.each do |record|
-      id = record["OBJECTID"]
-      adm[id] = adm[street_of.call(id)] + [id]
-      mun[id] = mun[street_of.call(id)] + [id]
-    end
-    builder.region(region, :adm_hierarchy, *hierarchy(adm, region))
-    builder.region(region, :mun_hierarchy, *hierarchy(mun, region))
-
-    builder.region(region, :addr_obj_params,
+    add_region(builder, "43", objects:, houses:, parents: { adm:, mun: })
+    # Историческая запись улицы Воровского: прежнее название «Старая»
+    builder.region("43", :addr_obj,
+                   address_object(4_300_011, "Старая", "ул", 8, "ID" => 9_300_011, "ISACTUAL" => "0", "ISACTIVE" => "0",
+                                                                "ENDDATE" => "2020-01-01", "NEXTID" => 4_300_011))
+    builder.region("43", :addr_obj_params,
                    param(1, 4_300_001, 16, "Кировская область"),
                    param(2, 4_300_010, 5, "610000"),
                    param(3, 4_300_010, 5, "610001", "CHANGEIDEND" => 77, "ENDDATE" => "2020-01-01"))
-    builder.region(region, :houses_params,
+    builder.region("43", :houses_params,
                    param(11, 4_300_101, 5, "610017"),
                    param(12, 4_300_101, 7, "33701000001"),
                    param(13, 4_300_104, 5, "610017"))
-
-    builder.region(region, :reestr_objects, *reestr(objects.map { |id, *, level| [id, level] } + houses.map { |h| [h["OBJECTID"], 10] }))
-    add_noise(builder, region)
+    add_noise(builder, "43")
   end
 
   def add_komi(builder)
-    region  = "11"
     objects = [[1_100_001, "Коми", "респ", 1], [1_100_002, "Сыктывкар", "г.о.", 3], [1_100_003, "Сыктывкар", "г", 5], [1_100_010, "Ленина", "ул", 8]]
-    builder.region(region, :addr_obj, *objects.map { |id, name, type, level| address_object(id, name, type, level) })
-    builder.region(region, :houses, house(1_100_101, "10"))
-    builder.region(region, :adm_hierarchy, *hierarchy({ 1_100_001 => [1_100_001], 1_100_003 => [1_100_001, 1_100_003],
-                                                        1_100_010 => [1_100_001, 1_100_003, 1_100_010],
-                                                        1_100_101 => [1_100_001, 1_100_003, 1_100_010, 1_100_101] }, region))
-    builder.region(region, :mun_hierarchy, *hierarchy({ 1_100_001 => [1_100_001], 1_100_002 => [1_100_001, 1_100_002],
-                                                        1_100_003 => [1_100_001, 1_100_002, 1_100_003],
-                                                        1_100_010 => [1_100_001, 1_100_002, 1_100_003, 1_100_010],
-                                                        1_100_101 => [1_100_001, 1_100_002, 1_100_003, 1_100_010, 1_100_101] }, region))
-    builder.region(region, :reestr_objects, *reestr(objects.map { |id, *, level| [id, level] } + [[1_100_101, 10]]))
+    adm     = { 1_100_003 => 1_100_001, 1_100_010 => 1_100_003, 1_100_101 => 1_100_010 }
+    mun     = adm.merge(1_100_002 => 1_100_001, 1_100_003 => 1_100_002)
+    add_region(builder, "11", objects:, houses: [house(1_100_101, "10")], parents: { adm:, mun: })
   end
 
   def add_moscow(builder)
-    region = "77"
-    builder.region(region, :addr_obj, address_object(7_700_001, "Москва", "г", 1), address_object(7_700_010, "Тверская", "ул", 8))
-    builder.region(region, :houses, house(7_700_101, "1"))
-    paths = { 7_700_001 => [7_700_001], 7_700_010 => [7_700_001, 7_700_010], 7_700_101 => [7_700_001, 7_700_010, 7_700_101] }
-    builder.region(region, :adm_hierarchy, *hierarchy(paths, region))
-    builder.region(region, :mun_hierarchy, *hierarchy(paths, region))
+    objects = [[7_700_001, "Москва", "г", 1], [7_700_010, "Тверская", "ул", 8]]
+    adm     = { 7_700_010 => 7_700_001, 7_700_101 => 7_700_010 }
+    add_region(builder, "77", objects:, houses: [house(7_700_101, "1")], parents: { adm:, mun: adm })
+  end
+
+  # parents — карты «объект → родитель» для :adm и :mun; объект без родителя — корень иерархии
+  def add_region(builder, region, objects:, houses:, parents:)
+    ids = objects.map(&:first) + houses.map { |record| record["OBJECTID"] }
+    builder.region(region, :addr_obj, *objects.map { |args| address_object(*args) })
+    builder.region(region, :houses, *houses)
+    builder.region(region, :adm_hierarchy, *hierarchy(ids, parents[:adm], region))
+    builder.region(region, :mun_hierarchy, *hierarchy(ids, parents[:mun], region))
+    levels = objects.to_h { |id, *, level| [id, level] }
+    builder.region(region, :reestr_objects, *ids.map { |id| reestr_object(id, levels.fetch(id, 10)) })
   end
 
   def add_noise(builder, region)
@@ -142,6 +121,10 @@ module GarSampleArchive
                                               "OPERTYPEID" => 10, "CHANGEDATE" => "2024-01-01" })
   end
 
+  def type_attributes(short_name, name)
+    { "SHORTNAME" => short_name, "NAME" => name, "DESC" => name, **DICTIONARY }
+  end
+
   def address_object(object_id, name, type_name, level, overrides = {})
     { "ID" => object_id, "OBJECTID" => object_id, "OBJECTGUID" => guid(object_id), "CHANGEID" => object_id, "NAME" => name,
       "TYPENAME" => type_name, "LEVEL" => level, "OPERTYPEID" => 10, **DATES, **ACTUAL }.merge(overrides)
@@ -152,9 +135,13 @@ module GarSampleArchive
       "HOUSENUM" => number, "HOUSETYPE" => 2, "OPERTYPEID" => 10, **DATES, **ACTUAL }.merge(overrides)
   end
 
-  def hierarchy(paths, region)
-    paths.map do |object_id, path|
-      { "ID" => object_id, "OBJECTID" => object_id, "PARENTOBJID" => path[-2] || 0, "CHANGEID" => object_id,
+  # Строки иерархии для объектов, которые в ней участвуют (есть родитель или потомки);
+  # PATH собирается подъёмом по родителям до корня
+  def hierarchy(object_ids, parents, region)
+    object_ids.select { |id| parents.key?(id) || parents.value?(id) }.map do |object_id|
+      path = [object_id]
+      path.unshift(parents[path.first]) while parents.key?(path.first)
+      { "ID" => object_id, "OBJECTID" => object_id, "PARENTOBJID" => parents.fetch(object_id, 0), "CHANGEID" => object_id,
         "REGIONCODE" => region, **DATES, "ISACTIVE" => "1", "PATH" => path.join(".") }
     end
   end
@@ -164,10 +151,8 @@ module GarSampleArchive
       "VALUE" => value, **DATES }.merge(overrides)
   end
 
-  def reestr(objects)
-    objects.map do |object_id, level|
-      { "OBJECTID" => object_id, "OBJECTGUID" => guid(object_id), "CHANGEID" => object_id, "ISACTIVE" => "1",
-        "LEVELID" => level, "CREATEDATE" => "2024-01-01", "UPDATEDATE" => "2024-01-01" }
-    end
+  def reestr_object(object_id, level)
+    { "OBJECTID" => object_id, "OBJECTGUID" => guid(object_id), "CHANGEID" => object_id, "ISACTIVE" => "1",
+      "LEVELID" => level, "CREATEDATE" => "2024-01-01", "UPDATEDATE" => "2024-01-01" }
   end
 end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "tmpdir"
 
 # Сквозная характеризация 1.0.0: архив → импорт → пути → поиск → переключение схем.
 # Страховочная сетка рефакторинга. Ошибки из анализа (docs/rails_integration_plan.md) описаны
@@ -10,7 +11,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
   let(:archive_dir)   { Dir.mktmpdir("gar_pipeline") }
   let(:zip_path)      { archive.write(archive_dir) }
   let(:importer)      { Gar::Importer.new(db_connection) }
-  let(:import_schema) { "gar_v#{archive.version_id}" }
+  let(:import_schema) { "gar_v20260116" }
 
   def guid(object_id)
     GarSampleArchive.guid(object_id)
@@ -29,11 +30,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
                  .to_h { |row| [row["object_id"].to_i, row[column]] }
   end
 
-  before do
-    db_connection.set_notice_processor { nil }
-    TestDatabase.drop_schemas([import_schema])
-    register_schema_for_cleanup(import_schema)
-  end
+  before { register_schema_for_cleanup(import_schema) }
 
   after { FileUtils.rm_rf(archive_dir) }
 
@@ -44,7 +41,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       counts = Gar.configuration.import_entities.to_h { |table| [table, table_count(import_schema, table)] }
       expect(counts).to eq(
         object_levels: 5, address_object_types: 6, address_objects: 12, house_types: 2, houses: 10,
-        reestr_objects: 18, adm_hierarchy: 19, mun_hierarchy: 21, param_types: 4, params: 0
+        reestr_objects: 21, adm_hierarchy: 19, mun_hierarchy: 21, param_types: 4, params: 0
       )
     end
 
@@ -196,10 +193,10 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
   describe "переключение схем" do
     let(:current_schema) { isolated_schema("gar_current") }
-    let(:backup_schema)  { register_schema_for_cleanup("gar_backup_v20260116") }
+    let(:backup_schema)  { "gar_backup_v20260116" }
 
     before do
-      TestDatabase.drop_schemas([backup_schema])
+      register_schema_for_cleanup(backup_schema)
       Gar.configuration.database_schema = current_schema
     end
 

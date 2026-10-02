@@ -2,7 +2,6 @@
 
 require "zip"
 require "securerandom"
-require "tmpdir"
 
 # Синтетический архив ГАР с реальной структурой (см. docs/gar_archive_structure.md):
 # version.txt, 10 справочников в корне, в каждой папке субъекта — все 18 файлов.
@@ -12,51 +11,50 @@ require "tmpdir"
 #   builder = GarArchiveBuilder.new(version: "2026.01.16")
 #   builder.root(:house_types, { "ID" => 2, "NAME" => "Дом", ... })
 #   builder.region("43", :houses, { "ID" => 1, "OBJECTID" => 10, ... })
-#   zip_path = builder.write(dir)
+#   zip_path = builder.write(Dir.mktmpdir)
 class GarArchiveBuilder
   ROOT_FILES = {
-    addhouse_types:       ["AS_ADDHOUSE_TYPES", "HOUSETYPES", "HOUSETYPE"],
-    addr_obj_types:       ["AS_ADDR_OBJ_TYPES", "ADDRESSOBJECTTYPES", "ADDRESSOBJECTTYPE"],
-    apartment_types:      ["AS_APARTMENT_TYPES", "APARTMENTTYPES", "APARTMENTTYPE"],
-    house_types:          ["AS_HOUSE_TYPES", "HOUSETYPES", "HOUSETYPE"],
-    normative_docs_kinds: ["AS_NORMATIVE_DOCS_KINDS", "NDOCKINDS", "NDOCKIND"],
-    normative_docs_types: ["AS_NORMATIVE_DOCS_TYPES", "NDOCTYPES", "NDOCTYPE"],
-    object_levels:        ["AS_OBJECT_LEVELS", "OBJECTLEVELS", "OBJECTLEVEL"],
-    operation_types:      ["AS_OPERATION_TYPES", "OPERATIONTYPES", "OPERATIONTYPE"],
-    param_types:          ["AS_PARAM_TYPES", "PARAMTYPES", "PARAMTYPE"],
-    room_types:           ["AS_ROOM_TYPES", "ROOMTYPES", "ROOMTYPE"]
+    addhouse_types:       ["HOUSETYPES", "HOUSETYPE"],
+    addr_obj_types:       ["ADDRESSOBJECTTYPES", "ADDRESSOBJECTTYPE"],
+    apartment_types:      ["APARTMENTTYPES", "APARTMENTTYPE"],
+    house_types:          ["HOUSETYPES", "HOUSETYPE"],
+    normative_docs_kinds: ["NDOCKINDS", "NDOCKIND"],
+    normative_docs_types: ["NDOCTYPES", "NDOCTYPE"],
+    object_levels:        ["OBJECTLEVELS", "OBJECTLEVEL"],
+    operation_types:      ["OPERATIONTYPES", "OPERATIONTYPE"],
+    param_types:          ["PARAMTYPES", "PARAMTYPE"],
+    room_types:           ["ROOMTYPES", "ROOMTYPE"]
   }.freeze
 
   REGION_FILES = {
-    addr_obj:          ["AS_ADDR_OBJ", "ADDRESSOBJECTS", "OBJECT"],
-    addr_obj_division: ["AS_ADDR_OBJ_DIVISION", "ITEMS", "ITEM"],
-    addr_obj_params:   ["AS_ADDR_OBJ_PARAMS", "PARAMS", "PARAM"],
-    adm_hierarchy:     ["AS_ADM_HIERARCHY", "ITEMS", "ITEM"],
-    apartments:        ["AS_APARTMENTS", "APARTMENTS", "APARTMENT"],
-    apartments_params: ["AS_APARTMENTS_PARAMS", "PARAMS", "PARAM"],
-    carplaces:         ["AS_CARPLACES", "CARPLACES", "CARPLACE"],
-    carplaces_params:  ["AS_CARPLACES_PARAMS", "PARAMS", "PARAM"],
-    change_history:    ["AS_CHANGE_HISTORY", "ITEMS", "ITEM"],
-    houses:            ["AS_HOUSES", "HOUSES", "HOUSE"],
-    houses_params:     ["AS_HOUSES_PARAMS", "PARAMS", "PARAM"],
-    mun_hierarchy:     ["AS_MUN_HIERARCHY", "ITEMS", "ITEM"],
-    normative_docs:    ["AS_NORMATIVE_DOCS", "NORMDOCS", "NORMDOC"],
-    reestr_objects:    ["AS_REESTR_OBJECTS", "REESTR_OBJECTS", "OBJECT"],
-    rooms:             ["AS_ROOMS", "ROOMS", "ROOM"],
-    rooms_params:      ["AS_ROOMS_PARAMS", "PARAMS", "PARAM"],
-    steads:            ["AS_STEADS", "STEADS", "STEAD"],
-    steads_params:     ["AS_STEADS_PARAMS", "PARAMS", "PARAM"]
+    addr_obj:          ["ADDRESSOBJECTS", "OBJECT"],
+    addr_obj_division: ["ITEMS", "ITEM"],
+    addr_obj_params:   ["PARAMS", "PARAM"],
+    adm_hierarchy:     ["ITEMS", "ITEM"],
+    apartments:        ["APARTMENTS", "APARTMENT"],
+    apartments_params: ["PARAMS", "PARAM"],
+    carplaces:         ["CARPLACES", "CARPLACE"],
+    carplaces_params:  ["PARAMS", "PARAM"],
+    change_history:    ["ITEMS", "ITEM"],
+    houses:            ["HOUSES", "HOUSE"],
+    houses_params:     ["PARAMS", "PARAM"],
+    mun_hierarchy:     ["ITEMS", "ITEM"],
+    normative_docs:    ["NORMDOCS", "NORMDOC"],
+    reestr_objects:    ["REESTR_OBJECTS", "OBJECT"],
+    rooms:             ["ROOMS", "ROOM"],
+    rooms_params:      ["PARAMS", "PARAM"],
+    steads:            ["STEADS", "STEAD"],
+    steads_params:     ["PARAMS", "PARAM"]
   }.freeze
 
-  XML_ESCAPES = { "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", '"' => "&quot;" }.freeze
+  # В реальных архивах дата в именах файлов не совпадает с версией выгрузки
+  FILE_DATE = "20260115"
 
   attr_reader :version
 
-  # version   — содержимое version.txt (дата выгрузки); file_date — дата в именах файлов,
-  # в реальных архивах она не совпадает с версией
-  def initialize(version: "2026.01.16", file_date: "20260115")
+  # version — содержимое version.txt (дата выгрузки)
+  def initialize(version: "2026.01.16")
     @version   = version
-    @file_date = file_date
     @root      = Hash.new { |hash, table| hash[table] = [] }
     @regions   = Hash.new { |hash, code| hash[code] = Hash.new { |files, table| files[table] = [] } }
   end
@@ -82,15 +80,15 @@ class GarArchiveBuilder
     self
   end
 
-  def write(dir = Dir.mktmpdir("gar_archive"), name: "gar_xml_v#{version_id}.zip")
+  def write(dir, name: "gar_xml_v#{version_id}.zip")
     path = File.join(dir, name)
 
     Zip::OutputStream.open(path) do |zip|
       put(zip, "version.txt", "#{version}\nv.223")
-      ROOT_FILES.each { |table, spec| put(zip, file_name(nil, spec), xml(spec, @root[table])) }
+      ROOT_FILES.each { |table, elements| put(zip, file_name(nil, table), xml(elements, @root[table])) }
 
       @regions.sort.each do |code, files|
-        REGION_FILES.each { |table, spec| put(zip, file_name(code, spec), xml(spec, files[table])) }
+        REGION_FILES.each { |table, elements| put(zip, file_name(code, table), xml(elements, files[table])) }
       end
     end
 
@@ -104,17 +102,18 @@ class GarArchiveBuilder
     zip.write(content)
   end
 
-  def file_name(region_code, (prefix, _root, _item))
-    name = "#{prefix}_#{@file_date}_#{SecureRandom.uuid}.XML"
+  # Ключи таблиц совпадают с именами файлов ФНС: :houses_params → AS_HOUSES_PARAMS
+  def file_name(region_code, table)
+    name = "AS_#{table.to_s.upcase}_#{FILE_DATE}_#{SecureRandom.uuid}.XML"
     region_code ? "#{region_code}/#{name}" : name
   end
 
-  def xml((_prefix, root, item), records)
+  def xml((root, item), records)
     body = records.map { |record| "<#{item} #{attributes(record)} />" }.join
     %(﻿<?xml version="1.0" encoding="utf-8"?><#{root}>#{body}</#{root}>)
   end
 
   def attributes(record)
-    record.filter_map { |key, value| %(#{key}="#{value.to_s.gsub(/[&<>"]/, XML_ESCAPES)}") unless value.nil? }.join(" ")
+    record.filter_map { |key, value| "#{key}=#{value.to_s.encode(xml: :attr)}" unless value.nil? }.join(" ")
   end
 end

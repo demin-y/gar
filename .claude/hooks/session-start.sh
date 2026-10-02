@@ -19,7 +19,7 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
   } >> "$CLAUDE_ENV_FILE"
 fi
 
-BUNDLE_SILENCE_ROOT_WARNING=1 bundle install --quiet
+bundle check >/dev/null 2>&1 || BUNDLE_SILENCE_ROOT_WARNING=1 bundle install --quiet
 
 # Тестовый PostgreSQL на :6433 (идемпотентно: если уже запущен — только проверяет базу)
 bin/setup_test_db

@@ -4,9 +4,12 @@ on:
   push:
   pull_request:
 
+# Push проверяет любую ветку; pull_request — только из форков, чтобы ветка этого репозитория
+# с открытым PR не гонялась дважды
 jobs:
   lint:
     name: RuboCop
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,13 +23,18 @@ jobs:
 
   test:
     name: RSpec (Ruby ${{ matrix.ruby }}, PostgreSQL ${{ matrix.postgres }})
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
 
+    # PostgreSQL 18 (как у портала) на всех Ruby, минимально поддерживаемый 16 — на одной
     strategy:
       fail-fast: false
       matrix:
         ruby: ['3.3', '3.4', '4.0']
-        postgres: ['16', '18']
+        postgres: ['18']
+        include:
+          - ruby: '3.4'
+            postgres: '16'
 
     services:
       postgres:

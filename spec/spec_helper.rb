@@ -25,21 +25,21 @@ RSpec.configure do |config|
   config.filter_run_excluding :slow unless ENV["GAR_SLOW_TESTS"]
 
   config.include TestDatabase::Helpers, :db
-  config.before(:context, :db) { TestDatabase.prepare! }
+  config.when_first_matching_example_defined(:db) do
+    config.before(:suite) { TestDatabase.prepare! }
+    config.after(:suite) { TestDatabase.disconnect }
+  end
   config.after(:each, :db) { TestDatabase.drop_schemas(@schemas_to_drop) }
-  config.after(:suite) { TestDatabase.disconnect }
 
-  # Каждый пример начинает со свежей конфигурацией гема
-  config.around do |example|
+  # Каждый пример начинает со свежей конфигурацией гема.
+  # TODO(этап 1): публичный Gar.reset_configuration! вместо записи во внутреннюю переменную
+  config.before do
     Gar.instance_variable_set(:@configuration, nil)
     Gar.configure do |gar|
       gar.database_url    = TestDatabase.url
       gar.parallel_import = false # параллельный импорт проверяют отдельные примеры
       gar.logger          = false unless ENV["GAR_TEST_LOG"]
     end
-    example.run
-  ensure
-    Gar::Database.disconnect!
-    Gar.instance_variable_set(:@configuration, nil)
   end
+  config.after { Gar::Database.disconnect! }
 end
