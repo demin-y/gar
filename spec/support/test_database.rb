@@ -6,8 +6,6 @@ require "securerandom"
 # Тестовая БД нужна только примерам с тегом :db — spec_helper готовит её один раз и только
 # если такие примеры загружены, поэтому unit-тесты работают без PostgreSQL.
 module TestDatabase
-  FIXTURES_DIR = File.expand_path("../fixtures", __dir__)
-
   class << self
     def url
       ENV.fetch("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:6433/gar_db_test")
@@ -19,13 +17,14 @@ module TestDatabase
     end
 
     # База тестовая и целиком наша: удаляем схемы, оставшиеся от прерванных прогонов,
-    # и заливаем фикстуры в схему gar
+    # и загружаем тестовый набор гема (Gar::TestSupport) в схему gar
     def prepare!
       drop_schemas(connection.exec(<<~SQL).column_values(0))
         SELECT nspname FROM pg_namespace
         WHERE nspname NOT LIKE 'pg\\_%' AND nspname NOT IN ('public', 'information_schema')
       SQL
-      load_fixtures
+      Gar.configuration.logger = false
+      Gar::TestSupport.load_fixtures(connection, schema: "gar")
     rescue PG::ConnectionBad => e
       raise "Тестовая БД недоступна (#{url}): #{e.message.strip}\n" \
             "Запустите bin/setup_test_db (или make test-db-up) либо задайте TEST_DATABASE_URL."
@@ -44,18 +43,6 @@ module TestDatabase
     def disconnect
       @connection&.close unless @connection&.finished?
       @connection = nil
-    end
-
-    private
-
-    # Отдельное соединение: schema.sql меняет search_path сессии
-    def load_fixtures
-      conn = PG.connect(url)
-      conn.set_notice_processor { nil }
-      conn.exec(File.read(File.join(FIXTURES_DIR, "schema.sql")))
-      conn.exec(File.read(File.join(FIXTURES_DIR, "data.sql")))
-    ensure
-      conn&.close
     end
   end
 

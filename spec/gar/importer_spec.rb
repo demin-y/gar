@@ -41,7 +41,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(tables_in(schema)).to match_array(Gar::Schema::TABLES.keys + [:gar_meta])
       expect(table_count(schema, "stead_params")).to eq(1)
-      expect(values("addr_obj_params")).to eq(["1", "2", "3"])
+      expect(values("addr_obj_params")).to eq(["1", "2", "3", "31"])
       expect(table_count(schema, "change_history")).to eq(1)
     end
 
@@ -66,8 +66,8 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "address_objects")).to eq(12)
-      expect(values("addr_obj_params")).to eq(["1", "2", "3"])
+      expect(table_count(schema, "address_objects")).to eq(18)
+      expect(values("addr_obj_params")).to eq(["1", "2", "3", "31"])
     end
 
     it "отбирает параметры по config.param_types" do
@@ -97,7 +97,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(values("houses", "region_code")).to eq(["11", "43"])
       expect(values("address_objects", "region_code")).to eq(["11", "43"])
-      expect(table_count(schema, "address_object_types")).to eq(6)
+      expect(table_count(schema, "address_object_types")).to eq(7)
       expected = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables, region_codes: ["43", "11"]).sum(&:size)
       expect(progress.last).to eq([expected, expected])
     end
@@ -121,7 +121,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
       expect(hierarchy_objects.call).to be_empty
-      expect(table_count(schema, "adm_hierarchy")).to eq(19)
+      expect(table_count(schema, "adm_hierarchy")).to eq(23)
 
       Gar.configuration.preset = :extended
       import
@@ -133,13 +133,14 @@ RSpec.describe Gar::Importer, :db do
       expect(hierarchy_objects.call).to eq([4_300_901, 4_300_902])
     end
 
-    it "загружает таблицы и в параллельных потоках" do
+    it "загружает таблицы и в параллельных потоках — через базу переданного соединения" do
       Gar.configuration.parallel_import          = true
       Gar.configuration.parallel_import_strategy = :threads
+      Gar.configuration.database_url             = "postgresql://postgres@127.0.0.1:1/gar"
 
       import
 
-      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([11, 10, 19, 3])
+      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([15, 11, 23, 3])
     end
   end
 
@@ -199,7 +200,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "houses")).to eq(10)
+      expect(table_count(schema, "houses")).to eq(11)
     end
 
     it "на повреждённом файле бросает ImportError с именем файла" do
@@ -236,8 +237,8 @@ RSpec.describe Gar::Importer, :db do
       importer.switch_to_imported_schema(import)
       importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
 
-      expect(table_count(current, "houses")).to eq(10)
-      expect(table_count(backup, "houses")).to eq(10)
+      expect(table_count(current, "houses")).to eq(11)
+      expect(table_count(backup, "houses")).to eq(11)
       expect(schema_exists?(schema)).to be(false)
     end
 

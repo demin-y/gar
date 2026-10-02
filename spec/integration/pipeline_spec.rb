@@ -11,7 +11,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
   let(:import_schema) { "gar_v20260116" }
 
   def guid(object_id)
-    GarSampleArchive.guid(object_id)
+    Gar::TestSupport::Sample.guid(object_id)
   end
 
   def import_with_paths
@@ -31,9 +31,9 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       counts = Gar.configuration.import_tables.to_h { |table| [table.name, table_count(import_schema, table.name)] }
       expect(counts).to eq(
-        object_levels: 5, address_object_types: 6, house_types: 2, add_house_types: 2, apartment_types: 0, room_types: 0,
+        object_levels: 8, address_object_types: 7, house_types: 2, add_house_types: 2, apartment_types: 1, room_types: 1,
         operation_types: 0, param_types: 4, normative_docs_kinds: 0, normative_docs_types: 0,
-        address_objects: 11, addr_obj_params: 2, adm_hierarchy: 19, mun_hierarchy: 21, houses: 10, house_params: 3
+        address_objects: 15, addr_obj_params: 3, adm_hierarchy: 23, mun_hierarchy: 26, houses: 11, house_params: 3
       )
     end
 
@@ -42,7 +42,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       ["address_objects", "houses", "adm_hierarchy", "mun_hierarchy"].each do |table|
         regions = db_connection.exec("SELECT DISTINCT region_code FROM #{import_schema}.#{table}").column_values(0)
-        expect(regions).to contain_exactly("43", "11", "77")
+        expect(regions).to contain_exactly("43", "11", "50", "77")
       end
     end
 
@@ -69,13 +69,14 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       expect(db_connection.exec("SELECT 1").getvalue(0, 0)).to eq("1")
       expect(importer.db_conn.exec("SELECT 1").getvalue(0, 0)).to eq("1")
-      expect(table_count(import_schema, "houses")).to eq(10)
+      expect(table_count(import_schema, "houses")).to eq(11)
     end
 
     it "импортирует действующие параметры нужных типов из файлов *_PARAMS (ошибка 2)" do
       importer.import_full_base(zip_path)
 
-      expect(column_by_object(import_schema, "addr_obj_params", "value")).to eq(4_300_001 => "Кировская область", 4_300_010 => "610000")
+      expect(column_by_object(import_schema, "addr_obj_params", "value")).to eq(4_300_001 => "Кировская область", 4_300_010 => "610000",
+                                                                                807_356 => "Московская область")
       expect(table_count(import_schema, "house_params")).to eq(3)
     end
 
@@ -90,7 +91,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       Gar.configuration.database_schema = import_schema
 
       expect { importer.import_full_base(zip_path) }.to raise_error(Gar::ImportError, /текущая/)
-      expect(table_count(import_schema, "houses")).to eq(10)
+      expect(table_count(import_schema, "houses")).to eq(11)
     end
 
     it "не использует остатки распаковки прерванного импорта 1.x (ошибка 4)" do
@@ -101,7 +102,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       importer.import_full_base(zip_path)
 
-      expect(table_count(import_schema, "houses")).to eq(10)
+      expect(table_count(import_schema, "houses")).to eq(11)
     end
   end
 
@@ -179,7 +180,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
     end
 
     it "отдаёт регионы и прямых потомков по иерархии" do
-      expect(search.find_address_objects.map(&:name)).to contain_exactly("Кировская", "Коми", "Москва")
+      expect(search.find_address_objects.map(&:name)).to contain_exactly("Кировская", "Коми", "Москва", "Московская")
       expect(search.find_address_objects(parent_guid: guid(4_300_003)).map(&:name)).to eq(["Воровского", "Ленина"])
     end
 
@@ -211,7 +212,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       expect(schema_exists?(current_schema)).to be(true)
       expect(schema_exists?(import_schema)).to be(false)
-      expect(table_count(current_schema, "houses")).to eq(10)
+      expect(table_count(current_schema, "houses")).to eq(11)
     end
 
     it "сохраняет прежнюю текущую схему как резервную с её версией" do

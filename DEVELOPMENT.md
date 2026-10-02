@@ -105,7 +105,7 @@
 - Postgres 16
 - Порт: `6433:5432`
 - Volume: `postgres_test_data`
-- Auto-init: загружает `spec/fixtures/*.sql`
+- Пустая: данные загружают спеки (`Gar::TestSupport.load_fixtures`)
 - Healthcheck: каждые 5 секунд
 
 ### Volumes
@@ -142,13 +142,12 @@ psql postgresql://postgres:postgres@localhost:6433/gar_db_test
 
 ## Работа с базами данных
 
-### Fixtures (test БД)
+### Тестовые данные (test БД)
 
-Файлы в `spec/fixtures/`:
-- `schema.sql` - DDL (создание таблиц, индексов)
-- `data.sql` - Тестовые данные (INSERT)
-
-Применяются автоматически при создании db-test через `docker-entrypoint-initdb.d`.
+Набор `Gar::TestSupport::Sample` (`lib/gar/test_support/sample.rb`) загружается перед спеками
+через `Gar::TestSupport.load_fixtures` в схему `gar` тем же импортом, что и реальный архив:
+DDL из `Gar::Schema`, затем `PathBuilder`. Ручных `*.sql` нет — новые колонки и таблицы
+попадают в фикстуры сами.
 
 ### Сброс БД
 
@@ -156,7 +155,7 @@ psql postgresql://postgres:postgres@localhost:6433/gar_db_test
 # Dev БД - удаляет volume, пересоздает контейнер
 make dev-db-reset
 
-# Test БД - удаляет volume, пересоздает с fixtures
+# Test БД - удаляет volume, пересоздает пустую
 make test-db-reset
 ```
 
@@ -182,7 +181,7 @@ docker-compose exec -T db-dev psql -U postgres gar_db_dev < backup.sql
 ### Стратегия
 
 - **Unit тесты:** Не требуют БД
-- **Integration тесты:** Используют test БД с fixtures
+- **Тесты с тегом `:db`:** Используют test БД со схемой `gar` из `Gar::TestSupport`
 
 ### spec_helper.rb логика
 

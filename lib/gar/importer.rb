@@ -20,13 +20,16 @@ module Gar
       @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
     end
 
-    # Возвращает имя схемы с данными. region_codes — коды субъектов (папки архива), по умолчанию
+    # Возвращает имя схемы с данными. source — путь к zip или Archive (в том числе
+    # TestSupport::MemoryArchive). region_codes — коды субъектов (папки архива), по умолчанию
     # config.region_codes, пустой список — все; on_progress — ->(done, total, stage): байты
-    # разобранного XML, stage = :import. Ошибки базы и файлов приходят как ImportError;
-    # незавершённая схема (gar_meta.status = importing) остаётся до повторного импорта, который
-    # создаст её заново.
-    def import_full_base(zip_path, schema: nil, region_codes: nil, on_progress: nil)
-      archive      = Archive.new(zip_path)
+    # разобранного XML, stage = :import; parallel — параллельно ли загружать файлы и строить
+    # индексы (по умолчанию config.parallel_import). Ошибки базы и файлов приходят как
+    # ImportError; незавершённая схема (gar_meta.status = importing) остаётся до повторного
+    # импорта, который создаст её заново.
+    def import_full_base(source, schema: nil, region_codes: nil, on_progress: nil, parallel: Gar.configuration.parallel_import)
+      archive      = open_archive(source)
+      @parallel    = parallel
       schema     ||= "gar_v#{archive.version_id}"
       region_codes = region_codes.nil? ? Gar.configuration.region_codes : Configuration.region_codes(region_codes)
       tables       = Gar.configuration.import_tables
@@ -100,7 +103,7 @@ module Gar
     # Загружает файлы параллельно или по очереди; блок вызывается в этом процессе после
     # каждого загруженного файла с числом записей
     def each_loaded(archive, jobs, schema)
-      if Gar.configuration.parallel_import && jobs.size > 1
+      if @parallel && jobs.size > 1
         Parallel.each(jobs, **parallel_options, finish: ->(job, _index, count) { yield job, count }) do |job|
           with_worker_connection { |conn| load_job(conn, archive, job, schema) }
         end
@@ -185,7 +188,7 @@ module Gar
     # Работа на сервере по таблицам (ключи, индексы, отбор иерархий): таблицы независимы, при
     # parallel_import обрабатываются параллельно в потоках — каждый со своим соединением
     def each_on_server(tables)
-      if Gar.configuration.parallel_import && tables.size > 1
+      if @parallel && tables.size > 1
         Parallel.each(tables, in_threads: Gar.configuration.parallel_import_workers) do |table|
           with_worker_connection { |conn| yield conn, table }
         end
@@ -207,12 +210,16 @@ module Gar
     end
 
     # У каждого воркера своё соединение: PG::Connection нельзя делить между потоками и процессами
+    # Соединение потока или процесса — к той же базе, что и основное (переданное приложением
+    # тоже), а не к config.database_url
     def with_worker_connection
-      conn = Database.create_connection
+      conn = Database.adopt(PG.connect(@db_conn.conninfo_hash.compact))
       yield conn
     ensure
       conn&.close
     end
+
+    def open_archive(source) = source.is_a?(Archive) ? source : Archive.new(source)
 
     def warn_missing_regions(jobs, region_codes)
       missing = region_codes - jobs.filter_map(&:region_code)

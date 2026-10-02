@@ -18,6 +18,7 @@ module Gar
   autoload :PathBuilder,     "gar/path_builder"
   autoload :Schema,          "gar/schema"
   autoload :Search,          "gar/search"
+  autoload :TestSupport,     "gar/test_support"
   autoload :Utils,           "gar/utils"
   autoload :XmlReader,       "gar/xml_reader"
 
@@ -39,17 +40,10 @@ module Gar
     # Соединение из пула поиска на время блока; недоступная база — UnavailableError
     def with_connection(&) = Database.with_connection(&)
 
-    # База доступна и готова к поиску: текущая схема есть и пути в ней построены (их
-    # полнотекстовые индексы PathBuilder создаёт последними). Запрос только к каталогу,
-    # хватает права SELECT; ошибка соединения или прав — false
+    # База доступна и готова к поиску: в текущей схеме импорт завершён и пути построены
+    # (gar_meta.status = ready). Хватает права SELECT; ошибка соединения или прав — false
     def available?
-      schema  = configuration.database_schema
-      markers = Configuration::HIERARCHY_TABLES.keys.map { "#{Schema.quote(schema)}.#{Schema.quote("idx_address_objects_full_#{_1}_path_tsv")}" }
-      with_connection do |conn|
-        conn.exec_params(<<~SQL, [Schema.fetch(:address_objects).qualified_name(schema), *markers]).getvalue(0, 0) == "t"
-          SELECT to_regclass($1) IS NOT NULL AND (#{markers.each_index.map { "to_regclass($#{_1 + 2}) IS NOT NULL" }.join(' OR ')})
-        SQL
-      end
+      with_connection { |conn| Meta.read(conn, configuration.database_schema)&.status == "ready" }
     rescue UnavailableError, PG::Error => e
       logger.warn "База ГАР недоступна: #{e.message.strip}"
       false
