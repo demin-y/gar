@@ -149,13 +149,21 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
         .to contain_exactly(guid(4_300_010), guid(1_100_010))
     end
 
+    it "сначала отдаёт совпадения по названию, затем по пути, с общей пагинацией" do
+      found = search.search_address_objects("Киров")
+
+      expect(found.first(2).map(&:name)).to contain_exactly("Киров", "город Киров")
+      expect(found.drop(2).map(&:name)).to contain_exactly("Ленина", "Воровского")
+      expect(search.search_address_objects("Киров", limit: 2, offset: 1)).to eq(found[1, 2])
+    end
+
     it "находит дома по улице и номеру без границы субъекта (Т6)" do
       expect(search.search_houses("Ленина 10").map(&:object_guid))
         .to contain_exactly(guid(4_300_101), guid(1_100_101))
     end
 
     it "в режиме автодополнения ищет номер по префиксу и пропускает неактивные дома" do
-      expect(search.search_houses("Ленина 1", autocomplete: true).map(&:object_id))
+      expect(search.search_houses("Ленина 1", autocomplete: true).map(&:gar_id))
         .to contain_exactly(1_100_101, 4_300_101, 4_300_102, 4_300_103, 4_300_104, 4_300_105, 4_300_106)
     end
 
@@ -173,9 +181,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
       expect(search.find_house_by_guid(guid(4_300_104))).to have_attributes(house_num: "12", house_type: "д.")
     end
 
-    it "фильтрует потомков по списку уровней, как обещает README" do
-      pending "Ошибка 19: find_address_objects подставляет level через `ao.level = :level`, массив ломает SQL"
-
+    it "фильтрует потомков по списку уровней (ошибка 19)" do
       expect(search.find_address_objects(parent_guid: guid(4_300_001), level: [5, 8]).map(&:name)).to eq(["Киров"])
     end
   end

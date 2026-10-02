@@ -59,6 +59,7 @@ dev-db-up: ## Запустить dev БД
 	@$(COMPOSE_DEV)
 	@echo "$(GREEN)Dev БД запущена!$(NC)"
 	@echo "$(YELLOW)Connection: $(DEV_DB_URL)$(NC)"
+	@echo "$(YELLOW)Для примеров: export GAR_DATABASE_URL=$(DEV_DB_URL)$(NC)"
 
 dev-db-down: ## Остановить dev БД
 	@echo "$(CYAN)Остановка dev БД...$(NC)"
@@ -137,7 +138,7 @@ db-status: ## Показать статус всех БД контейнеров
 db-info: ## Показать информацию о подключении к БД
 	@echo "$(CYAN)Информация о БД:$(NC)"
 	@echo "$(YELLOW)Development БД:$(NC)"
-	@echo "  URL: $(DEV_DB_URL)"
+	@echo "  URL: $(DEV_DB_URL) (GAR_DATABASE_URL для примеров)"
 	@echo "  Порт: 6432"
 	@echo "  База: gar_db_dev"
 	@echo ""

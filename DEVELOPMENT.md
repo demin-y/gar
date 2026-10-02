@@ -73,7 +73,7 @@
 
 | Переменная | Значение | Описание |
 |------------|----------|----------|
-| `DATABASE_URL` | `postgresql://postgres:postgres@db-dev:5432/gar_db_dev` | Dev БД |
+| `GAR_DATABASE_URL` | `postgresql://postgres:postgres@db-dev:5432/gar_db_dev` | Dev БД гема |
 | `RUBY_VERSION` | `3.4.5` | Версия Ruby |
 | `BUNDLE_GEMFILE` | `/workspace/Gemfile` | Путь к Gemfile |
 
@@ -190,7 +190,7 @@ docker-compose exec -T db-dev psql -U postgres gar_db_dev < backup.sql
 # before(:suite)
 1. Запускает docker-compose up -d db-test
 2. Ждет готовности БД (healthcheck)
-3. Устанавливает DATABASE_URL для Gar
+3. Задаёт config.database_url = TEST_DATABASE_URL
 
 # after(:suite)
 1. Закрывает подключения

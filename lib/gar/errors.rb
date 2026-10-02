@@ -7,6 +7,10 @@ module Gar
   # Неверная настройка гема
   class ConfigurationError < Error; end
 
+  # База ГАР недоступна: нет соединения, истёк connect_timeout, statement_timeout или ожидание
+  # соединения из пула. Приложение может переключить форму на ручной ввод адреса
+  class UnavailableError < Error; end
+
   # Ошибка загрузки архива с сайта ФНС
   class DownloadError < Error; end
 

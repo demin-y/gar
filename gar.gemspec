@@ -27,10 +27,10 @@ Gem::Specification.new do |spec|
 
   spec.required_ruby_version = ">= 3.3"
 
-  spec.add_dependency "logger",   "~> 1.5"
-  spec.add_dependency "mini_sql", "~> 1.6"
-  spec.add_dependency "ox",       "~> 2.14"
-  spec.add_dependency "parallel", "~> 1.26"
-  spec.add_dependency "pg",       "~> 1.2"
-  spec.add_dependency "rubyzip",  "~> 3.0"
+  spec.add_dependency "connection_pool", ">= 2.5", "< 4"
+  spec.add_dependency "logger",          "~> 1.5"
+  spec.add_dependency "ox",              "~> 2.14"
+  spec.add_dependency "parallel",        "~> 1.26"
+  spec.add_dependency "pg",              "~> 1.2"
+  spec.add_dependency "rubyzip",         "~> 3.0"
 end

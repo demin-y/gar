@@ -27,11 +27,13 @@ module Gar
     attr_accessor :full_base_dir, :delta_dir, :api_ssl_verify, :api_retry_attempts, :api_retry_timeout,
                   :api_read_timeout, :database_url, :database_schema, :api_all_versions_url,
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
-                  :import_maintenance_work_mem, :db_retry_max_attempts, :db_retry_base_delay
+                  :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
+                  :search_statement_timeout
     attr_reader   :preset, :hierarchies
 
     def initialize
-      @database_url                = ENV.fetch("DATABASE_URL", "postgresql://postgres:postgres@localhost:6432/gar_db_dev")
+      # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
+      @database_url                = ENV.fetch("GAR_DATABASE_URL", nil)
       @database_schema             = "gar"
       @full_base_dir               = "./downloads/full_base"
       @delta_dir                   = "./downloads/delta"
@@ -48,8 +50,11 @@ module Gar
       @parallel_import_workers     = [Etc.nprocessors, 4].min
       @parallel_import_strategy    = detect_parallel_strategy
       @import_maintenance_work_mem = nil
-      @db_retry_max_attempts       = 3
-      @db_retry_base_delay         = 0.5
+      # Пул соединений поиска; таймауты в секундах (connect_timeout у libpq — не меньше 2)
+      @pool_size                   = 5
+      @pool_timeout                = 5
+      @connect_timeout             = 2
+      @search_statement_timeout    = 1
     end
 
     # Сначала набор, затем тонкая настройка: явно заданные tables, param_types и keep_history

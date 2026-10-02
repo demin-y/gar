@@ -5,6 +5,44 @@
 Версия готовится к встраиванию в Rails-приложение; публичный API меняется несовместимо
 с 1.x. Ход работ — `docs/rails_integration_plan.md`.
 
+### Работа внутри Rails-процесса (этап 3)
+
+**Несовместимые изменения**
+- Адрес базы — `ENV["GAR_DATABASE_URL"]` или `config.database_url`; `DATABASE_URL` больше не
+  читается, значения по умолчанию нет. Без настройки — `Gar::ConfigurationError`.
+- `Gar::Database` — модуль соединений: удалены `Database.connection` (одно соединение на
+  процесс), `Database.new`, `#with_retry`, `#ensure_alive!`, `#reconnect!` и настройки
+  `db_retry_max_attempts`, `db_retry_base_delay`.
+- `Gar::Search`: без соединения берёт его из пула на время вызова; схема фиксируется при
+  создании (`Search.new(conn = nil, schema:)`). Результаты — `Gar::AddressObject` и
+  `Gar::House` (`Data`) вместо объектов `mini_sql`; OBJECTID — `gar_id` (`object_id` занят
+  Ruby), у результатов всегда оба пути и нет `rank`. Удалён аргумент `path_type:` у
+  `find_*_by_guid`; неизвестный `path_type` — `ArgumentError`; некорректный GUID — `nil`/`[]`.
+- `find_address_objects` без `parent_guid` учитывает `level:` (по умолчанию — регионы).
+- Зависимость `mini_sql` удалена, добавлена `connection_pool`.
+- `Gar::Database.discard_inherited_connections` удалён: соединения, переданные в
+  `Importer.new`/`PathBuilder.new`, гем берёт под свою защиту от fork (`Database.adopt`).
+
+**Новое**
+- Пул соединений поиска: `config.pool_size` (5), `config.pool_timeout` (5 с),
+  `Gar.with_connection { |conn| … }`. Пул пересоздаётся, когда меняются его настройки или
+  адрес базы.
+- Таймауты: `config.connect_timeout` (2 с) для всех соединений,
+  `config.search_statement_timeout` (1 с) только для поиска.
+- `Gar::UnavailableError`: нет соединения, `statement_timeout`, ожидание пула. Оборванное
+  соединение в пул не возвращается.
+- Fork-safety: после `fork` соединения гема отбрасываются без `PQfinish` (хук
+  `Process._fork`), пул создаётся заново.
+- `Gar.available?` — база отвечает, текущая схема есть, пути построены (запрос только к
+  каталогу: таблица и полнотекстовые индексы путей).
+- Событие `search.gar` через `ActiveSupport::Notifications`, если он загружен.
+
+**Исправлено**
+- `find_address_objects(level: [5, 6])` падал на массиве (ошибка 19).
+- Поиск адресных объектов делал три запроса (название, счётчик, путь) — теперь один, с общей
+  пагинацией, и пути не сканируются, если совпадений по названию хватает; имя схемы в SQL
+  экранируется.
+
 ### Пути, загрузчик, конфигурация (этап 2)
 
 **Несовместимые изменения**

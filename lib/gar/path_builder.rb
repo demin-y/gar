@@ -19,7 +19,7 @@ module Gar
     attr_reader :db_conn, :schema
 
     def initialize(db_conn = nil, schema: Gar.configuration.database_schema)
-      @db_conn = db_conn || Database.create_connection
+      @db_conn = db_conn ? Database.adopt(db_conn) : Database.create_connection
       @schema  = schema
     end
 
