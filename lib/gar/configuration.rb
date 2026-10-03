@@ -33,7 +33,8 @@ module Gar
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
                   :search_statement_timeout, :prune_hierarchy, :builtin_synonyms
-    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups, :max_delta_chain, :download_mode
+    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups, :max_delta_chain, :download_mode,
+                  :full_import_interval
 
     def initialize
       # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
@@ -62,6 +63,11 @@ module Gar
       @keep_backups                = 1
       # Gar.update!: больше дельт подряд — полный импорт вместо цепочки
       @max_delta_chain             = 30
+      # Gar.update!: полный импорт, если прошлый был больше стольких дней назад (nil — только
+      # дельты). В дельтах ФНС бывают пропуски: новый дом приходит в иерархиях и параметрах, но
+      # без записи в AS_HOUSES (207 домов субъектов 43 и 11 за 8 месяцев 2026 года), — полный
+      # импорт их догружает
+      @full_import_interval        = 30
       @logger                      = nil
       @parallel_import             = true
       @parallel_import_workers     = [Etc.nprocessors, 4].min
@@ -111,6 +117,10 @@ module Gar
 
     def keep_backups=(count)
       @keep_backups = non_negative(count, "keep_backups — число резервных схем, 0 или больше")
+    end
+
+    def full_import_interval=(days)
+      @full_import_interval = days && non_negative(days, "full_import_interval — дней между полными импортами, 0 или больше, или nil")
     end
 
     def max_delta_chain=(count)

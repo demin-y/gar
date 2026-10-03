@@ -86,6 +86,22 @@ RSpec.describe "Дельты", :db do
       expect([house_count(4_300_010), house_count(4_300_003)]).to eq(before.map { _1 + 1 })
     end
 
+    it "дом без записи в дельте (пропуск ФНС): строки иерархии отброшены, о параметрах без дома — предупреждение" do
+      log = StringIO.new
+      Gar.configuration.logger = Logger.new(log)
+      zip =
+        delta do |d|
+          d.region("43", :adm_hierarchy, item(4_300_109, "4300001.4300003.4300010.4300109"))
+          d.region("43", :houses_params, { "ID" => 99, "OBJECTID" => 4_300_109, "CHANGEID" => 99, "CHANGEIDEND" => 0, "TYPEID" => 5,
+                                           "VALUE" => "610000", **sample::DATES })
+        end
+
+      apply(zip)
+
+      expect(count(:adm_hierarchy, "object_id = 4300109")).to eq(0)
+      expect(log.string).to include("у 1 объектов есть параметры, но нет записи в houses", "4300109")
+    end
+
     it "дом стал недействующим: строки иерархии удалены, в числе домов не считается" do
       before = house_count(4_300_010)
       zip =
@@ -257,6 +273,17 @@ RSpec.describe "Дельты", :db do
       expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_116, reason: /настройки загрузки/)
       expect(Gar.current_version.region_codes).to eq(["11", "43"])
       expect(Gar.update!).to have_attributes(kind: :none, reason: nil)
+    end
+
+    it "раз в full_import_interval дней загружает выгрузку полным импортом, даже той же версии" do
+      load_current
+      stub_fias_versions(20_260_116 => { full: zip_path })
+      expect(Gar.update!).to have_attributes(kind: :none)
+
+      db_connection.exec("UPDATE #{current}.gar_meta SET imported_at = now() - interval '31 days'")
+      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_116, reason: /full_import_interval/)
+      expect(Gar.current_version.imported_at).to be > Time.now - 3600
+      expect(Gar.update!).to have_attributes(kind: :none)
     end
   end
 end

@@ -69,7 +69,9 @@ module Gar
           from       = current&.version_id
           if (reason = full_import_reason(current, versions))
             logger.info "Полный импорт: #{reason}"
-            full_update(conn, downloader.download_full_base(latest, region_codes: configuration.region_codes, on_progress:), on_progress)
+            # По расписанию загружается и выгрузка той же версии, что текущая: в ней есть то, чего не было в дельтах
+            full_update(conn, downloader.download_full_base(latest, region_codes: configuration.region_codes, on_progress:), on_progress,
+                        reuse_current: !full_import_due?(current))
             downloader.remove_outdated(latest["VersionId"]) if configuration.cleanup_downloads
             next UpdateResult.new(kind: :full, from_version: from, to_version: latest["VersionId"], versions: [], reason:)
           end
@@ -130,22 +132,33 @@ module Gar
     def full_import_reason(current, versions)
       return "готовой текущей схемы нет" unless current&.ready?
       return "настройки загрузки в config (субъекты, таблицы…) не совпадают с текущей схемой" unless current.same_import?(current.version_id, **import_settings)
-      return if current.version_id >= versions.last["VersionId"]
+      return "прошлый полный импорт — #{current.imported_at.to_date}, больше full_import_interval дней назад" if full_import_due?(current)
 
-      index = versions.index { _1["VersionId"] == current.version_id } or return "версии #{current.version_id} нет в списке выгрузок ФНС"
+      chain_break(current.version_id, versions) unless current.version_id >= versions.last["VersionId"]
+    end
+
+    # Почему выгрузки после version_id нельзя накатить дельтами; nil — можно
+    def chain_break(version_id, versions)
+      index = versions.index { _1["VersionId"] == version_id } or return "версии #{version_id} нет в списке выгрузок ФНС"
       chain = versions.drop(index + 1)
-      return "дельт после #{current.version_id}: #{chain.size}, больше max_delta_chain" if chain.size > configuration.max_delta_chain
+      return "дельт после #{version_id}: #{chain.size}, больше max_delta_chain" if chain.size > configuration.max_delta_chain
 
       missing = chain.find { _1["GarXMLDeltaURL"].to_s.empty? }
       "у выгрузки #{missing['VersionId']} нет дельты" if missing
+    end
+
+    # Прошлый полный импорт старее config.full_import_interval дней
+    def full_import_due?(current)
+      days = configuration.full_import_interval
+      days && current&.imported_at && current.imported_at < Time.now - (days * 86_400)
     end
 
     # Субъекты и таблицы, которые загрузит импорт по текущей конфигурации (для Meta#same_import?)
     def import_settings = { region_codes: configuration.region_codes, tables: configuration.import_tables.map(&:name) }
 
     # Полный импорт архива zip в новую схему, пути, переключение и очистка схем
-    def full_update(conn, zip, on_progress)
-      schema = Importer.new(conn).import_full_base(zip, on_progress:, reuse_current: true)
+    def full_update(conn, zip, on_progress, reuse_current: true)
+      schema = Importer.new(conn).import_full_base(zip, on_progress:, reuse_current:)
       return if schema == configuration.database_schema # текущая уже загружена из этой выгрузки
 
       PathBuilder.new(conn, schema:).build(on_progress:)

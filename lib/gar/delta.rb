@@ -19,6 +19,9 @@ module Gar
     include Loggable
 
     UPDATES = "gar_updates"
+    # Таблицы параметров и их объектов: действующие параметры без записи объекта — пропуск в
+    # дельте ФНС (новый дом приходит в иерархиях и параметрах, но не в AS_HOUSES)
+    PARAM_OBJECTS = { addr_obj_params: :address_objects, house_params: :houses }.freeze
     # Колонки, от которых зависят пути: запись, у которой изменилось только остальное (даты,
     # CHANGEID), путей не меняет
     PATH_COLUMNS = {
@@ -91,6 +94,7 @@ module Gar
       else
         counts = merge_all(tables, meta, archive)
       end
+      warn_missing_objects(tables, meta, archive)
       Meta.advance(db_conn, schema, archive)
       journal(archive, counts)
       logger.info "Дельта #{archive.version_id} применена: #{counts[:upserted]} записей добавлено или изменено, #{counts[:deleted]} удалено"
@@ -187,6 +191,27 @@ module Gar
       table.actual.each { |attribute, value| conditions << "s.#{quote(column(table, attribute))} = #{literal(value)}" }
       conditions << "(s.end_date IS NULL OR s.end_date > #{literal(archive.version_date.iso8601)})" if table.params?
       conditions
+    end
+
+    # Предупреждение о действующих параметрах объектов, записей которых нет ни в дельте, ни в
+    # схеме: ФНС не прислала запись объекта. Такие объекты загрузит полный импорт
+    # (config.full_import_interval)
+    def warn_missing_objects(tables, meta, archive)
+      PARAM_OBJECTS.each do |params, objects|
+        table = tables.find { _1.name == params } or next
+        next unless meta.tables.include?(objects)
+
+        ids = db_conn.exec(<<~SQL).column_values(0)
+          SELECT DISTINCT s.object_id FROM #{staging(table)} s
+          WHERE #{record_conditions(table, meta, archive).then { _1.empty? ? 'true' : _1.join(' AND ') }}
+            AND NOT EXISTS (SELECT 1 FROM #{Schema.fetch(objects).qualified_name(schema)} o WHERE o.object_id = s.object_id)
+          LIMIT 1000
+        SQL
+        next if ids.empty?
+
+        logger.warn "Дельта #{archive.version_id}: у #{ids.size} объектов есть параметры, но нет записи в #{objects} — пропуск в " \
+                    "выгрузке ФНС, их загрузит полный импорт (config.full_import_interval). OBJECTID: #{ids.first(5).join(', ')}"
+      end
     end
 
     def prune_condition(table, meta)
