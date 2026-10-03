@@ -36,8 +36,7 @@ module Gar
         url    = config.database_url
         raise ConfigurationError, "Не задана база ГАР: укажите config.database_url или переменную GAR_DATABASE_URL" if url.to_s.empty?
 
-        settings = ["-c client_min_messages=warning", *("-c statement_timeout=#{(statement_timeout * 1000).round}" if statement_timeout)]
-        adopt(PG.connect(url, connect_timeout: config.connect_timeout, application_name: "gar", options: settings.join(" ")))
+        adopt(PG.connect(url, connect_timeout: config.connect_timeout, application_name: "gar", options: options(url, statement_timeout)))
       end
 
       # Соединение, которое гем не трогает после fork, — в том числе переданное приложением
@@ -119,6 +118,14 @@ module Gar
       end
 
       private
+
+      # Параметр options соединения: свой из адреса базы (search_path, роль…) и настройки гема
+      # после него — options при подключении заменяет options из адреса, а не дополняет
+      def options(url, statement_timeout)
+        own = PG::Connection.conninfo_parse(url).find { _1[:keyword] == "options" }&.dig(:val)
+        [own, "-c client_min_messages=warning", *("-c statement_timeout=#{(statement_timeout * 1000).round}" if statement_timeout)]
+          .compact.reject(&:empty?).join(" ")
+      end
 
       def translate_errors
         yield

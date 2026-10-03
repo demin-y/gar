@@ -9,17 +9,18 @@
 # 1. Инварианты: у действующих записей со строкой иерархии есть путь; OBJECTID пути
 #    (*_path_ids) совпадают с PATH иерархии; у объекта не больше одной действующей актуальной
 #    записи.
-# 2. Пересчёт с нуля: таблицы копируются в схему <схема>_check без путей и рангов, PathBuilder
-#    строит их заново, и они сравниваются с проверяемой схемой по id записи.
+# 2. Пересчёт с нуля: таблицы копируются в схему <схема>_consistency без путей и рангов,
+#    PathBuilder строит их заново, и они сравниваются с проверяемой схемой по id записи.
 #
 # Печатает число расхождений по каждой проверке и до 5 примеров; код выхода 1, если они есть.
-# Схема по умолчанию — config.database_schema; <схема>_check удаляется после проверки.
+# Схема по умолчанию — config.database_schema. <схема>_consistency создаётся и удаляется
+# скриптом; если такая схема уже есть, скрипт её не трогает и останавливается.
 
 require "bundler/setup"
 require "gar"
 
 schema = ARGV[0] || Gar.configuration.database_schema
-check  = "#{schema}_check"
+check  = "#{schema}_consistency"
 conn   = Gar::Database.create_connection
 q      = ->(name, in_schema = schema) { Gar::Schema.qualify(in_schema, name) }
 meta   = Gar::Meta.read(conn, schema) or abort("В схеме #{schema} нет gar_meta")
@@ -62,7 +63,7 @@ end
 
 puts "== Пересчёт путей и рангов с нуля (#{check})"
 started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-conn.exec("DROP SCHEMA IF EXISTS #{Gar::Schema.quote(check)} CASCADE")
+abort("Схема #{check} уже есть: удалите её сами или проверьте другую схему") if Gar::Schemas.exists?(conn, check)
 conn.exec("CREATE SCHEMA #{Gar::Schema.quote(check)}")
 begin
   conn.exec("CREATE TABLE #{q.call(Gar::Meta::TABLE, check)} AS SELECT * FROM #{q.call(Gar::Meta::TABLE)}")
