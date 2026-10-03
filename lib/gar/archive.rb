@@ -109,11 +109,29 @@ module Gar
 
     VERSION_FILE  = "version.txt"
     ENTRY_PATTERN = %r{\A(?:(?<region>\d{2})/)?AS_(?<file>[A-Z_]+)_\d{8}_[^/]+\.xml\z}i
+    # Комментарий частичного архива (Gar.download с субъектами): какие субъекты и таблицы в нём есть
+    PARTIAL = /\Agar-partial regions=(?<regions>[\d,]*) tables=(?<tables>[a-z_,]*)\z/
 
     attr_reader :path
 
     # Archive из пути к zip; Archive (в том числе TestSupport::MemoryArchive) — как есть
     def self.open(source) = source.is_a?(Archive) ? source : new(source)
+
+    # Файл таблицы по имени в архиве: [Schema::Table из tables, код субъекта или nil у
+    # справочника]; nil — файл не нужен: чужая таблица или файл не на своём месте (справочник в
+    # папке субъекта и наоборот)
+    def self.table_file(name, tables)
+      match  = ENTRY_PATTERN.match(name) or return
+      table  = tables.find { _1.file == match[:file].upcase } or return
+      region = match[:region]
+      [table, region] if table.regional == !region.nil?
+    end
+
+    # Комментарий частичного архива с субъектами region_codes и таблицами субъекта из tables
+    # (Schema::Table; справочники корня в нём всегда)
+    def self.partial_comment(region_codes, tables)
+      "gar-partial regions=#{region_codes.join(',')} tables=#{tables.select(&:regional).map(&:name).join(',')}"
+    end
 
     def initialize(path)
       raise ImportError, "Архив не найден: #{path}" unless File.file?(path)
@@ -141,12 +159,36 @@ module Gar
 
     # Работы импорта для таблиц (Schema::Table): справочники корня и таблицы субъектов —
     # всех или только region_codes. Крупные файлы первыми: так параллельный импорт не ждёт
-    # в конце один большой файл.
+    # в конце один большой файл. Частичный архив без нужных субъектов или таблиц — ImportError
     def jobs(tables, region_codes: nil)
-      by_file = tables.to_h { [_1.file, _1] }
-      codes   = Configuration.region_codes(region_codes)
-      jobs    = entries.each_value.filter_map { |entry| job_for(entry, by_file, codes) }
+      codes = Configuration.region_codes(region_codes)
+      unless covers?(codes, tables)
+        raise ImportError, "Архив #{File.basename(path)} частичный (субъекты #{partial[:regions].join(', ')}, таблицы " \
+                           "#{partial[:tables].join(', ')}): в нём нет нужных данных — скачайте выгрузку с этими субъектами (Gar.download)"
+      end
+
+      jobs =
+        entries.each_value.filter_map do |entry|
+          file = self.class.table_file(entry.name, tables) or next
+          table, region = file
+          Job.new(table:, region_code: region, entry:) if region.nil? || codes.empty? || codes.include?(region)
+        end
       jobs.sort_by { -_1.size }
+    end
+
+    # Субъекты и таблицы частичного архива: { regions: ["43", "11"], tables: [:houses, …] };
+    # nil — архив полный
+    def partial
+      entries
+      @partial
+    end
+
+    # Есть ли в архиве субъекты region_codes (пустой список — все) и таблицы tables (Schema::Table)
+    def covers?(region_codes, tables)
+      return true unless partial
+      return false if region_codes.empty?
+
+      (region_codes - partial[:regions]).empty? && (tables.select(&:regional).map(&:name) - partial[:tables]).empty?
     end
 
     # Поток данных файла (Entry или Job) прямо из zip
@@ -165,23 +207,15 @@ module Gar
 
     def open_entry(entry) = File.open(path, "rb") { |file| yield Stream.new(file, entry) }
 
-    # Работа для файла архива; nil — файл не нужен: чужая таблица, чужой субъект или файл
-    # не на своём месте (справочник в папке субъекта и наоборот)
-    def job_for(entry, by_file, codes)
-      match  = ENTRY_PATTERN.match(entry.name) or return
-      table  = by_file[match[:file].upcase] or return
-      region = match[:region]
-      return unless table.regional == !region.nil?
-      return unless region.nil? || codes.empty? || codes.include?(region)
-
-      Job.new(table:, region_code: region, entry:)
-    end
-
-    # Оглавление zip читается один раз: имя → Entry
+    # Оглавление zip читается один раз: имя → Entry; заодно — комментарий частичного архива
     def entries
       @entries ||=
         begin
           Zip::File.open(path) do |zip|
+            @partial =
+              PARTIAL.match(zip.comment.to_s)&.then do |match|
+                { regions: match[:regions].split(","), tables: match[:tables].split(",").map(&:to_sym) }
+              end
             zip.entries.to_h do |entry|
               [entry.name, Entry.new(name: entry.name, size: entry.size, compressed_size: entry.compressed_size, crc: entry.crc,
                                      offset: entry.local_header_offset, compression_method: entry.compression_method)]

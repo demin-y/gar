@@ -17,10 +17,15 @@ module FiasApi
     stub_request(:get, "#{API}/GetLastDownloadFileInfo").to_return(body: infos.max_by { _1["VersionId"] }.to_json)
   end
 
-  # Ссылка на архив kind выгрузки id ("" — архива нет); сервер отдаёт files[kind]
+  # Ссылка на архив kind выгрузки id ("" — архива нет); сервер отдаёт files[kind] целиком, без
+  # Range (частичная загрузка переходит на полный архив)
   def stub_archive(id, kind, files)
     return "" unless files[kind]
 
-    "#{DOWNLOADS}/#{id}/gar_#{kind}_xml.zip".tap { stub_request(:get, _1).to_return(body: File.binread(files[kind])) }
+    "#{DOWNLOADS}/#{id}/gar_#{kind}_xml.zip".tap do |url|
+      body = File.binread(files[kind])
+      stub_request(:head, url).to_return(headers: { "Content-Length" => body.bytesize.to_s })
+      stub_request(:get, url).to_return(body:)
+    end
   end
 end

@@ -51,7 +51,7 @@ RSpec.describe "Rake-задачи", :db do
     stub_fias_versions(20_260_116 => { full: zip_path })
 
     expect(rake("gar:download")).to include("Скачивание", "Архив: #{Gar.configuration.full_base_dir}")
-    expect(rake("gar:update")).to include("Полный импорт: версия — → 20260116")
+    expect(rake("gar:update")).to include("Полный импорт (готовой текущей схемы нет): версия — → 20260116")
     expect(rake("gar:update")).to include("ГАР актуален: версия 20260116")
   ensure
     WebMock.allow_net_connect!

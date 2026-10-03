@@ -51,9 +51,19 @@ module Gar
       raise ImportError, "Ошибка импорта в схему #{schema}: #{e.message}"
     end
 
-    # Последний скачанный архив в directory (по умолчанию config.full_base_dir) или nil
-    def self.find_latest_full_base_zip(directory: nil)
-      Dir.glob(File.join(directory || Gar.configuration.full_base_dir, "*.zip")).max_by { File.mtime(_1) }
+    # Последний скачанный архив в directory (по умолчанию config.full_base_dir) или nil. С
+    # region_codes — только архив, в котором есть эти субъекты и таблицы config.import_tables:
+    # полный или частичный с ними (Gar.download с субъектами); пустой список — только полный
+    def self.find_latest_full_base_zip(directory: nil, region_codes: nil)
+      zips = Dir.glob(File.join(directory || Gar.configuration.full_base_dir, "*.zip")).sort_by { -File.mtime(_1).to_f }
+      return zips.first if region_codes.nil?
+
+      codes = Configuration.region_codes(region_codes)
+      zips.find do |zip|
+        Archive.new(zip).covers?(codes, Gar.configuration.import_tables)
+      rescue ImportError # не zip или повреждён
+        false
+      end
     end
 
     # Делает схему текущей (database_schema); прежняя текущая становится резервной

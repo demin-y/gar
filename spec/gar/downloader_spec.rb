@@ -38,15 +38,27 @@ RSpec.describe Gar::Downloader do
 
     it "сообщает об отсутствующей версии, ошибке API и неверном JSON как DownloadError" do
       stub_request(:get, "#{api}/GetAllDownloadFileInfo").to_return(body: "[]")
-      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(status: 500).then.to_return(body: "<html>")
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(status: 500).times(3).then.to_return(body: "<html>")
 
       expect { downloader.version_info(1) }.to raise_error(Gar::DownloadError, /Версия 1 не найдена/)
       expect { downloader.latest_version }.to raise_error(Gar::DownloadError, /500/)
       expect { downloader.latest_version }.to raise_error(Gar::DownloadError, /JSON/)
     end
 
-    it "повторяет запрос при сетевой ошибке" do
-      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_raise(Errno::ECONNRESET).then.to_return(body: version.to_json)
+    it "проверяет сертификат по config.api_ca_file" do
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_return(body: version.to_json)
+      allow(Net::HTTP).to receive(:start).and_call_original
+      Gar.configuration.api_ca_file = "/etc/ssl/russian_trusted_root_ca.pem"
+
+      downloader.latest_version
+
+      expect(Net::HTTP).to have_received(:start).with("fias.nalog.ru", 443, hash_including(ca_file: "/etc/ssl/russian_trusted_root_ca.pem"))
+    end
+
+    it "повторяет запрос при сетевой ошибке и ответах 5xx и 429" do
+      stub_request(:get, "#{api}/GetLastDownloadFileInfo").to_raise(Errno::ECONNRESET).then.to_return(status: 503).then
+                                                          .to_return(status: 429).then.to_return(body: version.to_json)
+      Gar.configuration.api_retry_attempts = 4
 
       expect(downloader.latest_version).to eq(version)
     end
@@ -165,6 +177,20 @@ RSpec.describe Gar::Downloader do
       stub_request(:get, url).to_return(status: 404)
 
       expect { downloader.download_full_base(version) }.to raise_error(Gar::DownloadError, /404/)
+    end
+  end
+
+  describe "#remove_outdated" do
+    it "удаляет дельты не новее версии и полные архивы старее неё, в том числе в общем каталоге" do
+      Gar.configuration.delta_dir = dir
+      names = ["gar_delta_xml_v20260120.zip", "gar_delta_xml_v20260123.zip", "gar_delta_xml_v20260127.zip",
+               "gar_xml_v20260116.zip", "gar_xml_v20260116_r43_11.zip", "gar_xml_v20260123_r43_11.zip"]
+      names.each { FileUtils.touch(File.join(dir, _1)) }
+
+      removed = downloader.remove_outdated(20_260_123)
+
+      expect(removed.map { File.basename(_1) }).to match_array(names.first(2) + names[3, 2])
+      expect(Dir.children(dir)).to contain_exactly("gar_delta_xml_v20260127.zip", "gar_xml_v20260123_r43_11.zip")
     end
   end
 

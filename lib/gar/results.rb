@@ -64,9 +64,9 @@ module Gar
 
   # Итог Gar.update!: kind — :none (база уже последней версии), :delta (применены дельты
   # versions) или :full (полный импорт версии to_version); from_version — версия до обновления
-  # (nil — базы не было)
+  # (nil — базы не было); reason — почему полный импорт («настройки загрузки … не совпадают»)
   UpdateResult =
-    Data.define(:kind, :from_version, :to_version, :versions) do
+    Data.define(:kind, :from_version, :to_version, :versions, :reason) do
       include Serializable
     end
 
