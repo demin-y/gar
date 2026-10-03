@@ -44,7 +44,7 @@ module Gar
       say case result.kind
           when :none  then "ГАР актуален: версия #{result.to_version}"
           when :delta then "Применены дельты #{result.versions.join(', ')}: версия #{result.from_version} → #{result.to_version}"
-          else "Полный импорт: версия #{result.from_version || '—'} → #{result.to_version}"
+          else "Полный импорт (#{result.reason}): версия #{result.from_version || '—'} → #{result.to_version}"
           end
     rescue LockedError => e
       say "Обновление пропущено: #{e.message}"

@@ -86,6 +86,22 @@ RSpec.describe "Дельты", :db do
       expect([house_count(4_300_010), house_count(4_300_003)]).to eq(before.map { _1 + 1 })
     end
 
+    it "дом без записи в дельте (пропуск ФНС): строки иерархии отброшены, о параметрах без дома — предупреждение" do
+      log = StringIO.new
+      Gar.configuration.logger = Logger.new(log)
+      zip =
+        delta do |d|
+          d.region("43", :adm_hierarchy, item(4_300_109, "4300001.4300003.4300010.4300109"))
+          d.region("43", :houses_params, { "ID" => 99, "OBJECTID" => 4_300_109, "CHANGEID" => 99, "CHANGEIDEND" => 0, "TYPEID" => 5,
+                                           "VALUE" => "610000", **sample::DATES })
+        end
+
+      apply(zip)
+
+      expect(count(:adm_hierarchy, "object_id = 4300109")).to eq(0)
+      expect(log.string).to include("у 1 объектов есть параметры, но нет записи в houses", "4300109")
+    end
+
     it "дом стал недействующим: строки иерархии удалены, в числе домов не считается" do
       before = house_count(4_300_010)
       zip =
@@ -208,7 +224,8 @@ RSpec.describe "Дельты", :db do
     after { WebMock.allow_net_connect! }
 
     it "применяет цепочку дельт по порядку, а на последней версии ничего не делает" do
-      load_current(region_codes: ["43", "11"])
+      Gar.configuration.region_codes = ["43", "11"]
+      load_current
       second = delta("2026.01.23") { _1.region("43", :addr_obj, street(4_300_010, "Свободы", { "ID" => 9_400_010 })) }
       first  = delta { _1.region("43", :addr_obj, street(4_300_010, "Ленина", { **sample::CLOSED, "NEXTID" => 9_400_010 })) }
       stub_fias_versions(20_260_116 => {}, 20_260_123 => { delta: second }, 20_260_120 => { delta: first })
@@ -219,6 +236,7 @@ RSpec.describe "Дельты", :db do
       expect(result).to have_attributes(kind: :delta, from_version: 20_260_116, to_version: 20_260_123, versions: [20_260_120, 20_260_123])
       expect(stages.uniq).to eq([:download, :delta])
       expect(house_path(4_300_101)).to eq("Кировская обл, Киров г, Свободы ул, д. 10")
+      expect(Dir.children(Gar.configuration.delta_dir)).to be_empty # применённые дельты удалены
       expect(Gar.update!).to have_attributes(kind: :none, from_version: 20_260_123, versions: [])
     end
 
@@ -231,18 +249,41 @@ RSpec.describe "Дельты", :db do
     end
 
     it "при разрыве цепочки или слишком длинной цепочке переходит на полный импорт" do
-      load_current(region_codes: ["43", "11"])
+      Gar.configuration.region_codes = ["43", "11"]
+      load_current
       full = GarSampleArchive.build(version: "2026.01.20").write(archive_dir, name: "gar_xml_v20260120.zip")
       stub_fias_versions(20_260_110 => {}, 20_260_120 => { delta: delta, full: })
 
-      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_120)
+      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_120, reason: /нет в списке/)
       expect(Gar::Schemas.backups(db_connection, current)).to eq(["#{current}_backup_v20260116"])
 
       Gar.configuration.max_delta_chain = 0
       newer = GarSampleArchive.build(version: "2026.01.23").write(archive_dir, name: "gar_xml_v20260123.zip")
       stub_fias_versions(20_260_120 => {}, 20_260_123 => { delta: delta("2026.01.23"), full: newer })
-      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_120, to_version: 20_260_123)
+      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_120, to_version: 20_260_123, reason: /max_delta_chain/)
       expect(Gar.current_version.version_id).to eq(20_260_123)
+    end
+
+    it "загружает заново полным импортом, если в config изменились субъекты, даже на последней версии" do
+      Gar.configuration.region_codes = ["43"]
+      load_current
+      stub_fias_versions(20_260_116 => { full: zip_path })
+      Gar.configuration.region_codes = ["43", "11"]
+
+      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_116, reason: /настройки загрузки/)
+      expect(Gar.current_version.region_codes).to eq(["11", "43"])
+      expect(Gar.update!).to have_attributes(kind: :none, reason: nil)
+    end
+
+    it "раз в full_import_interval дней загружает выгрузку полным импортом, даже той же версии" do
+      load_current
+      stub_fias_versions(20_260_116 => { full: zip_path })
+      expect(Gar.update!).to have_attributes(kind: :none)
+
+      db_connection.exec("UPDATE #{current}.gar_meta SET imported_at = now() - interval '31 days'")
+      expect(Gar.update!).to have_attributes(kind: :full, from_version: 20_260_116, to_version: 20_260_116, reason: /full_import_interval/)
+      expect(Gar.current_version.imported_at).to be > Time.now - 3600
+      expect(Gar.update!).to have_attributes(kind: :none)
     end
   end
 end

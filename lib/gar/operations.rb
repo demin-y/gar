@@ -15,19 +15,21 @@ module Gar
   # получает LockedError. Ошибки — исключения гема (Gar::Error), без exit и вывода в консоль.
   class << self
     # Скачивает полную выгрузку версии version_id (по умолчанию последней) в
-    # config.full_base_dir; возвращает путь к zip
-    def download(version_id = nil, on_progress: nil)
+    # config.full_base_dir; возвращает путь к zip. С субъектами (по умолчанию
+    # config.region_codes) — только их файлы загружаемых таблиц и справочники (сотни мегабайт
+    # вместо ~50 ГБ, Downloader#download_full_base); пустой список — весь архив
+    def download(version_id = nil, region_codes: configuration.region_codes, on_progress: nil)
       downloader = Downloader.new
       info       = version_id ? downloader.version_info(version_id) : downloader.latest_version
-      downloader.download_full_base(info, on_progress:)
+      downloader.download_full_base(info, region_codes:, on_progress:)
     end
 
     # Импортирует архив source (путь к zip, по умолчанию — последний в config.full_base_dir) в
     # схему <database_schema>_v<версия> и возвращает её имя. Если текущая схема уже загружена из
     # этой версии с теми же настройками и готова, возвращает текущую: импорт не нужен
     def import(source = nil, region_codes: nil, on_progress: nil)
-      source ||= Importer.find_latest_full_base_zip or
-        raise ConfigurationError, "Нет скачанного архива в #{configuration.full_base_dir}: сначала Gar.download"
+      source ||= Importer.find_latest_full_base_zip(region_codes: region_codes || configuration.region_codes) or
+        raise ConfigurationError, "Нет скачанного архива с нужными субъектами в #{configuration.full_base_dir}: сначала Gar.download"
       with_operation_connection { Importer.new(_1).import_full_base(source, region_codes:, on_progress:, reuse_current: true) }
     end
 
@@ -47,29 +49,26 @@ module Gar
     def cleanup_schemas(keep_backups: configuration.keep_backups) = with_operation_connection { cleanup_on(_1, keep_backups) }
 
     # Обновляет базу до последней выгрузки ФНС — точка входа для крона. Если текущая схема
-    # готова, а её версия есть в списке выгрузок, дельты новее неё применяются по порядку (не
-    # больше config.max_delta_chain подряд, у каждой должен быть архив). Иначе — нет базы,
-    # разрыв цепочки, слишком длинная цепочка — полный импорт последней выгрузки, пути,
-    # переключение и очистка схем. Всё обновление держит блокировку базы: второй запуск получает
-    # LockedError. on_progress — как у шагов загрузки, для дельт stage = :delta (байты XML).
-    # Возвращает Gar::UpdateResult
+    # готова, загружена с теми же настройками, что в config (субъекты, таблицы, типы параметров,
+    # keep_history, prune_hierarchy), а её версия есть в списке выгрузок, дельты новее неё
+    # применяются по порядку (не больше config.max_delta_chain подряд, у каждой должен быть
+    # архив). Иначе — нет базы, настройки изменились (добавили субъект), разрыв цепочки,
+    # слишком длинная цепочка — полный импорт последней выгрузки (с субъектами — частичная
+    # загрузка, Gar.download), пути, переключение и очистка схем. Всё обновление держит
+    # блокировку базы: второй запуск получает LockedError. on_progress — как у шагов загрузки,
+    # для дельт stage = :delta (байты XML). После обновления удаляет ставшие ненужными архивы
+    # (config.cleanup_downloads, Downloader#remove_outdated). Возвращает Gar::UpdateResult
+    # (reason — почему полный импорт)
     def update!(on_progress: nil)
       with_operation_connection do |conn|
         Database.with_lock(conn, "Обновление ГАР") do
           downloader = Downloader.new
-          current    = Meta.read(conn, configuration.database_schema)
           versions   = downloader.all_versions.sort_by { _1["VersionId"] }
-          latest     = versions.last or raise DownloadError, "API ФНС не вернул ни одной выгрузки"
-          from       = current&.version_id
-          next UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: []) if current&.ready? && from >= latest["VersionId"]
+          raise DownloadError, "API ФНС не вернул ни одной выгрузки" if versions.empty?
 
-          if (chain = delta_chain(current, versions))
-            chain.each { Delta.new(conn).apply(downloader.download_delta(_1, on_progress:), on_progress:) }
-            UpdateResult.new(kind: :delta, from_version: from, to_version: chain.last["VersionId"], versions: chain.map { _1["VersionId"] })
-          else
-            full_update(conn, downloader.download_full_base(latest, on_progress:), on_progress)
-            UpdateResult.new(kind: :full, from_version: from, to_version: latest["VersionId"], versions: [])
-          end
+          result = update_on(conn, downloader, Meta.read(conn, configuration.database_schema), versions, on_progress)
+          downloader.remove_outdated(result.to_version) if configuration.cleanup_downloads && result.kind != :none
+          result
         end
       end
     end
@@ -115,27 +114,56 @@ module Gar
       Database.with_lock(conn, "Очистка схем") { Schemas.cleanup(conn, configuration.database_schema, keep_backups:) }
     end
 
-    # Выгрузки после текущей версии, если их можно накатить дельтами; nil — нужен полный импорт
-    def delta_chain(current, versions)
-      return no_chain("готовой текущей схемы нет") unless current&.ready?
+    # Обновление текущей схемы current до последней из versions (по возрастанию): полный импорт
+    # или дельты — Gar::UpdateResult
+    def update_on(conn, downloader, current, versions, on_progress)
+      from = current&.version_id
+      if (reason = full_import_reason(current, versions))
+        logger.info "Полный импорт: #{reason}"
+        latest = versions.last
+        full_update(conn, downloader.download_full_base(latest, region_codes: configuration.region_codes, on_progress:), on_progress)
+        return UpdateResult.new(kind: :full, from_version: from, to_version: latest["VersionId"], versions: [], reason:)
+      end
 
-      index = versions.index { _1["VersionId"] == current.version_id } or return no_chain("версии #{current.version_id} нет в списке выгрузок ФНС")
+      chain = versions.select { _1["VersionId"] > from }
+      return UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: []) if chain.empty?
+
+      chain.each { Delta.new(conn).apply(downloader.download_delta(_1, on_progress:), on_progress:) }
+      UpdateResult.new(kind: :delta, from_version: from, to_version: chain.last["VersionId"], versions: chain.map { _1["VersionId"] })
+    end
+
+    # Почему нужен полный импорт, а не дельты (versions — по возрастанию); nil — текущая схема
+    # обновляется дельтами или уже последней версии. Причина есть — текущую схему загрузить
+    # заново нельзя: её нет, она загружена иначе, старше последней версии или пора по расписанию
+    def full_import_reason(current, versions)
+      settings = Meta.settings(region_codes: configuration.region_codes, tables: configuration.import_tables.map(&:name))
+      return "готовой текущей схемы нет" unless current&.ready?
+      return "настройки загрузки в config (субъекты, таблицы…) не совпадают с текущей схемой" unless current.settings == settings
+      return "прошлый полный импорт — #{current.imported_at.to_date}, больше full_import_interval дней назад" if full_import_due?(current)
+
+      chain_break(current.version_id, versions) unless current.version_id >= versions.last["VersionId"]
+    end
+
+    # Почему выгрузки после version_id нельзя накатить дельтами; nil — можно
+    def chain_break(version_id, versions)
+      index = versions.index { _1["VersionId"] == version_id } or return "версии #{version_id} нет в списке выгрузок ФНС"
       chain = versions.drop(index + 1)
-      return no_chain("дельт после #{current.version_id}: #{chain.size}, больше max_delta_chain") if chain.size > configuration.max_delta_chain
+      return "дельт после #{version_id}: #{chain.size}, больше max_delta_chain" if chain.size > configuration.max_delta_chain
 
       missing = chain.find { _1["GarXMLDeltaURL"].to_s.empty? }
-      missing ? no_chain("у выгрузки #{missing['VersionId']} нет дельты") : chain
+      "у выгрузки #{missing['VersionId']} нет дельты" if missing
     end
 
-    def no_chain(reason)
-      logger.info "Полный импорт: #{reason}"
-      nil
+    # Прошлый полный импорт старее config.full_import_interval дней
+    def full_import_due?(current)
+      days = configuration.full_import_interval
+      days && current.imported_at && current.imported_at < Time.now - (days * Downloader::SECONDS_PER_DAY)
     end
 
-    # Полный импорт архива zip в новую схему, пути, переключение и очистка схем
+    # Полный импорт архива zip в новую схему (текущая не переиспользуется: см.
+    # full_import_reason), пути, переключение и очистка схем
     def full_update(conn, zip, on_progress)
-      schema = Importer.new(conn).import_full_base(zip, on_progress:, reuse_current: true)
-      return if schema == configuration.database_schema # текущая уже загружена из этой выгрузки
+      schema = Importer.new(conn).import_full_base(zip, on_progress:)
 
       PathBuilder.new(conn, schema:).build(on_progress:)
       switch_on(conn, schema, on_progress)

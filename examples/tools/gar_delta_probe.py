@@ -9,8 +9,7 @@
 fias-file.nalog.ru/downloads/<ГГГГ.ММ.ДД>/gar_delta_xml.zip.
 Для URL читает только оглавление zip и файлы выбранных субъектов (HTTP Range). Нужен только
 Python 3.8+, без сторонних библиотек. Отчёт печатается и сохраняется в gar_delta_probe.txt —
-этот файл и нужно прислать. --insecure отключает проверку сертификата (у ФНС сертификат
-российского УЦ).
+этот файл и нужно прислать. --insecure отключает проверку сертификата (только для отладки).
 """
 import argparse, datetime, io, json, os, re, ssl, sys, traceback, zipfile, urllib.error, urllib.request
 import xml.etree.ElementTree as ET

@@ -1,39 +1,21 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Example: Download full GAR database
+# Скачивание последней выгрузки ГАР (Gar.download). С субъектами — только их файлы и справочники
+# (HTTP Range, два субъекта — ~300 МБ), без них — весь архив (~50 ГБ):
+#
+#   GAR_REGIONS=43,11 bundle exec ruby examples/1_download_full_database.rb [version_id]
 
-require "gar"
+require_relative "example_helper"
 
-# Отключить SSL верификацию для API
-Gar.configure do |config|
-  config.api_ssl_verify = false
-end
+regions = Gar.configuration.region_codes
+abort "Без GAR_REGIONS качается весь архив (~50 ГБ): задайте субъекты или GAR_FULL=1" if regions.empty? && !ENV["GAR_FULL"]
 
-puts "Скачивание полной базы данных GAR"
-puts "=" * 50
+# То же, что Gar.download(version_id), но сведения о выгрузке видны до скачивания
+downloader = Gar::Downloader.new
+info       = version_from_argv(downloader)
+puts "Выгрузка #{info['VersionId']} (#{info['TextVersion']}), субъекты: #{regions.empty? ? 'вся страна' : regions.join(', ')}"
 
-begin
-  downloader = Gar::Downloader.new
-
-  puts "Получение информации о последней версии..."
-  latest = downloader.latest_version
-
-  puts "Версия #{latest['VersionId']} (#{latest['Date']&.split('T')&.first})"
-  puts "Описание: #{latest['TextVersion']}"
-  puts ""
-
-  if latest["GarXMLFullURL"]
-    puts "URL: #{latest['GarXMLFullURL']}"
-    puts "Директория: #{Gar.configuration.full_base_dir}"
-    puts ""
-
-    puts "Скачивание..."
-    zip_path = downloader.download_full_base(latest, on_progress: ->(done, total, _) { print "\r#{done}/#{total}" })
-    puts "✓ ZIP файл скачан: #{zip_path}"
-  else
-    puts "✗ Полная база недоступна для этой версии"
-  end
-rescue StandardError => e
-  puts "Ошибка: #{e.message}"
-end
+zip = downloader.download_full_base(info, region_codes: regions, on_progress: progress)
+puts "Архив: #{zip} (#{Gar::Utils.format_size(File.size(zip))})"
+puts "Дальше: #{"GAR_REGIONS=#{regions.join(',')} " if regions.any?}bundle exec ruby examples/2_import_full_base.rb"

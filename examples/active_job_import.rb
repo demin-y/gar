@@ -24,7 +24,7 @@ class GarImportJob < ApplicationJob
     run.update!(status: "running", started_at: Time.current)
     progress = progress_reporter(run)
 
-    zip    = Gar.download(on_progress: progress)
+    zip    = Gar.download(region_codes:, on_progress: progress) # только файлы этих субъектов (~300 МБ на два)
     schema = Gar.import(zip, region_codes:, on_progress: progress)
     Gar.build_paths(schema, on_progress: progress)
     Gar.switch(schema, on_progress: progress)

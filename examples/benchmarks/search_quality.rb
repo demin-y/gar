@@ -15,7 +15,10 @@ require "gar"
 require "yaml"
 require_relative "support"
 
-MARKS   = { 1 => "✓", 2 => "2", 3 => "3" }.freeze
+MARKS = { 1 => "✓", 2 => "2", 3 => "3" }.freeze
+
+# Адреса равны без учёта точек и регистра: ФНС пишет краткие типы то «Коми Респ», то «Коми респ.»
+def same_address?(address, expected) = address.to_s.delete(".").downcase == expected.delete(".").downcase
 verbose = ARGV.delete("--verbose")
 file    = ARGV[0] || File.join(__dir__, "queries_43_11.yml")
 queries = YAML.safe_load_file(file, symbolize_names: true)
@@ -25,7 +28,7 @@ results =
   queries.map do |item|
     found   = nil
     elapsed = Benchmarks.timed { found = Gar.autocomplete(item[:query], limit: 10) }
-    { **item, found:, elapsed:, place: found.index { _1.address == item[:expect] }&.+(1) }
+    { **item, found:, elapsed:, place: found.index { same_address?(_1.address, item[:expect]) }&.+(1) }
   end
 
 results.each do |result|

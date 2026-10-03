@@ -8,7 +8,7 @@
 данные по HTTP Range, без скачивания архива целиком): проверочный архив двух субъектов.
 
 Для URL читается только оглавление zip и несколько КБ из файлов (HTTP Range), архив не скачивается.
---insecure отключает проверку сертификата (у ФНС сертификат российского УЦ).
+--insecure отключает проверку сертификата (только для отладки).
 Результат — в docs/gar_archive_structure.md.
 """
 import http.client as http_client, io, re, ssl, sys, time, zipfile, urllib.error, urllib.request

@@ -1,84 +1,39 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "gar"
+# Поиск по текущей схеме: автодополнение строки адреса, разобранный адрес по GUID, перенос
+# старого адреса (дом по GUID улицы и номеру) и методы Gar::Search. Запросы — для субъектов 43
+# и 11; свой запрос — аргументом:
+#
+#   GAR_DATABASE_URL=postgresql://… bundle exec ruby examples/5_search.rb ["Киров, ул. Ленина, д. 10"]
 
-# Пример использования поиска по ГАР
-#
-# Поиск использует двухфазную стратегию для address_objects:
-#   Фаза 1: поиск по name (быстрый, использует GIN-индекс idx_address_objects_fulltext)
-#   Фаза 2: дополнение из full_path через stored tsvector (если результатов фазы 1 недостаточно)
-#
-# Ранжирование учитывает уровень объекта: регионы > города > улицы
+require_relative "example_helper"
+
+abort "База ГАР недоступна или не готова (GAR_DATABASE_URL, gar_meta.status = ready)" unless Gar.available?
+
+puts "== Автодополнение (Gar.autocomplete)"
+(ARGV.empty? ? ["Киров, ул. Ленина, д. 10", "Сыктывкар Коммунистическая 33", "Кир", "610000"] : ARGV).each do |query|
+  puts "«#{query}»"
+  Gar.autocomplete(query, limit: 3).each { puts "  #{_1.kind == :house ? 'дом ' : 'объект'} #{_1.address || _1.name}" }
+end
 
 search = Gar::Search.new
+house  = Gar.autocomplete("Киров Ленина 10", limit: 1).first or abort "Нет дома «Киров Ленина 10»: в базе нет субъекта 43?"
+street = search.search_address_objects("Киров Ленина", limit: 1).first
 
-puts "\n=== Примеры поиска адресов ===\n"
+puts "\n== Адрес по GUID (Gar.address)"
+address = Gar.address(house.object_guid)
+puts "  #{address.full_address}"
+puts "  #{address.short_address}"
+puts "  индекс #{address.postal_code}, ОКТМО #{address.oktmo}, субъект #{address.region_code}"
 
-# 1. Полнотекстовый поиск address_objects
-# Двухфазный: сначала по name (город "Москва" будет первым), затем по full_path
-puts "1. Поиск 'Москва' (город ранжируется выше улиц благодаря level-based ranking):"
-results = search.search_address_objects("Москва", limit: 10)
-results.each do |result|
-  puts "  - [level #{result.level}] #{result.full_adm_path}"
+puts "\n== Перенос старого адреса (Gar.match_house)"
+["10", "д. 10, кв. 5", "10 лит. А"].each do |number|
+  match = Gar.match_house(street_guid: street.object_guid, number:)
+  puts "  «#{number}»: #{match.status} #{match.house&.full_adm_path} (альтернатив: #{match.alternatives.size})"
 end
 
-puts "\n2. Поиск 'Ленина ул' (фаза 1 найдёт по name, фаза 2 дополнит из full_path):"
-results = search.search_address_objects("Ленина ул", limit: 10)
-results.each do |result|
-  puts "  - [level #{result.level}] #{result.full_adm_path}"
-end
-
-# 2. Автодополнение (prefix-поиск с :* к последнему слову)
-puts "\n3. Автодополнение 'Моск':"
-results = search.search_address_objects("Моск", autocomplete: true, limit: 5)
-results.each do |result|
-  puts "  - #{result.full_adm_path}"
-end
-
-# 3. Поиск по муниципальной иерархии
-puts "\n4. Поиск по муниципальной иерархии (hierarchy: :mun):"
-results = search.search_address_objects("Тверь", hierarchy: :mun, limit: 3)
-results.each do |result|
-  puts "  - #{result.full_mun_path}"
-end
-
-# 4. Каскадный поиск по уровням (иерархическая навигация)
-puts "\n5. Каскадный поиск - регионы → города → улицы → дома:"
-regions = search.find_address_objects(limit: 3)
-regions.each do |region|
-  puts "  - #{region.name} #{region.type_name}"
-
-  cities = search.find_address_objects(parent_guid: region.object_guid, limit: 2)
-  cities.each do |city|
-    puts "    - #{city.name} #{city.type_name}"
-
-    streets = search.find_address_objects(parent_guid: city.object_guid, limit: 1)
-    streets.each do |street|
-      puts "      - #{street.name} #{street.type_name}"
-
-      houses = search.find_houses(street.object_guid, limit: 2)
-      houses.each do |house|
-        puts "        - #{house.house_type} #{house.house_num}"
-      end
-    end
-  end
-end
-
-# 5. Полнотекстовый поиск домов (stored tsvector на 34M строк)
-puts "\n6. Поиск домов (stored tsvector):"
-house_results = search.search_houses("Тверь д. 110", limit: 3)
-house_results.each do |house|
-  puts "  - #{house.full_adm_path}"
-end
-
-# 6. Поиск по GUID
-puts "\n7. Поиск по GUID:"
-if regions.any?
-  region_guid = regions.first.object_guid
-  found_region = search.find_address_object_by_guid(region_guid)
-  puts "  Найден: #{found_region.name} #{found_region.type_name}" if found_region
-  puts "  Путь: #{found_region.full_adm_path}" if found_region
-end
-
-puts "\n=== Завершено ===\n"
+puts "\n== Gar::Search"
+puts "  в границах города: #{search.find_address_objects(level: 8, within: address.parent_guids[1], limit: 3).map(&:name).join(', ')}"
+puts "  дома улицы: #{search.find_houses(street.object_guid, limit: 10).map(&:house_num).join(' ')}"
+puts "  по муниципальной иерархии: #{search.search_address_objects('Киров', hierarchy: :mun, limit: 1).first&.full_mun_path}"

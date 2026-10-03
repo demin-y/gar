@@ -23,13 +23,18 @@ module Gar
       full:     { tables: REGIONAL_TABLES, param_types: :all, keep_history: HISTORY_TABLES }
     }.freeze
     HIERARCHY_TABLES = { adm: :adm_hierarchy, mun: :mun_hierarchy }.freeze
+    # Как качать полную выгрузку: :auto — с субъектами только их файлы (HTTP Range), а если
+    # сервер не отдаёт части файла — весь архив с предупреждением в логе; :partial — только
+    # частично, иначе DownloadError; :full — всегда весь архив
+    DOWNLOAD_MODES = [:auto, :partial, :full].freeze
 
-    attr_accessor :full_base_dir, :delta_dir, :api_ssl_verify, :api_retry_attempts, :api_retry_timeout,
+    attr_accessor :full_base_dir, :delta_dir, :api_ssl_verify, :api_ca_file, :cleanup_downloads, :api_retry_attempts, :api_retry_timeout,
                   :api_read_timeout, :database_url, :database_schema, :api_all_versions_url,
                   :api_latest_version_url, :parallel_import, :parallel_import_workers, :parallel_import_strategy,
                   :import_maintenance_work_mem, :pool_size, :pool_timeout, :connect_timeout,
                   :search_statement_timeout, :prune_hierarchy, :builtin_synonyms
-    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups, :max_delta_chain
+    attr_reader   :preset, :hierarchies, :region_codes, :default_hierarchy, :synonyms, :keep_backups, :max_delta_chain, :download_mode,
+                  :full_import_interval
 
     def initialize
       # Своя переменная, а не DATABASE_URL: в Rails это база самого приложения
@@ -38,11 +43,16 @@ module Gar
       @full_base_dir               = "./downloads/full_base"
       @delta_dir                   = "./downloads/delta"
       @api_ssl_verify              = true
+      # Свой сертификат УЦ (PEM) для сайтов ФНС — прокси, российский УЦ — если его нет в ОС: проверка SSL остаётся
+      @api_ca_file                 = nil
+      # Gar.update! удаляет применённые дельты и полные архивы старее загруженного
+      @cleanup_downloads           = true
       @api_retry_attempts          = 3
       @api_retry_timeout           = 5
       @api_read_timeout            = 30
       @api_all_versions_url        = "https://fias.nalog.ru/WebServices/Public/GetAllDownloadFileInfo"
       @api_latest_version_url      = "https://fias.nalog.ru/WebServices/Public/GetLastDownloadFileInfo"
+      @download_mode               = :auto
       @preset                      = :minimal
       @hierarchies                 = HIERARCHY_TABLES.keys
       @region_codes                = [].freeze
@@ -53,6 +63,11 @@ module Gar
       @keep_backups                = 1
       # Gar.update!: больше дельт подряд — полный импорт вместо цепочки
       @max_delta_chain             = 30
+      # Gar.update!: полный импорт, если прошлый был больше стольких дней назад (nil — только
+      # дельты). В дельтах ФНС бывают пропуски: новый дом приходит в иерархиях и параметрах, но
+      # без записи в AS_HOUSES (207 домов субъектов 43 и 11 за 8 месяцев 2026 года), — полный
+      # импорт их догружает
+      @full_import_interval        = 30
       @logger                      = nil
       @parallel_import             = true
       @parallel_import_workers     = [Etc.nprocessors, 4].min
@@ -93,8 +108,19 @@ module Gar
       @hierarchies = names
     end
 
+    def download_mode=(mode)
+      mode = mode.to_sym if mode.respond_to?(:to_sym)
+      raise ConfigurationError, "download_mode — #{DOWNLOAD_MODES.map(&:inspect).join(', ')}, получено #{mode.inspect}" unless DOWNLOAD_MODES.include?(mode)
+
+      @download_mode = mode
+    end
+
     def keep_backups=(count)
       @keep_backups = non_negative(count, "keep_backups — число резервных схем, 0 или больше")
+    end
+
+    def full_import_interval=(days)
+      @full_import_interval = days && non_negative(days, "full_import_interval — дней между полными импортами, 0 или больше, или nil")
     end
 
     def max_delta_chain=(count)

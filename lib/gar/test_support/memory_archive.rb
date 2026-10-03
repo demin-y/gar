@@ -16,6 +16,7 @@ module Gar
         @path       = "memory"
         @version_id = version.delete(".").to_i
         @entries    = {}
+        @toc        = [@entries, nil] # частичным архив в памяти не бывает
         @xml        = {}
         root.each { |name, records| add(nil, name, records) }
         regions.each { |code, tables| tables.each { |name, records| add(code, name, records) } }
