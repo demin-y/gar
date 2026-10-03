@@ -35,7 +35,7 @@ module Gar
       # (тогда нужен полный архив)
       def download_partial(url, path, region_codes, tables, on_progress)
         uri  = URI(url)
-        size = remote_size(uri) or return
+        size = remote_size(uri) or return # без Range или размера — полный архив (download_mode)
         logger.info "Частичная загрузка #{url}: субъекты #{region_codes.join(', ')}"
         files = central_directory(uri, size).select { needed?(_1.name, region_codes, tables) }
         raise DownloadError, "В архиве #{url} нет файлов субъектов #{region_codes.join(', ')}" if files.none? { _1.name.include?("/") }
@@ -55,7 +55,7 @@ module Gar
         region_codes.include?(region)
       end
 
-      # Размер архива на сервере; nil — сервер не принимает Range
+      # Размер архива на сервере; nil — сервер не принимает Range или не сообщает размер
       def remote_size(uri)
         response = with_retries(uri.to_s) { http(uri) { check(_1.request(Net::HTTP::Head.new(uri))) } }
         raise DownloadError, "Архив #{uri} недоступен: #{response.code} #{response.message}" unless response.is_a?(Net::HTTPSuccess)
@@ -80,7 +80,8 @@ module Gar
         tail   = remote_bytes(uri, [size - EOCD - 0xFFFF - 20, 0].max, size - 1)
         at     = tail.rindex([SIGNATURES[:eocd]].pack("V")) or raise DownloadError, "#{uri}: не найден конец оглавления zip"
         count, length, offset = tail.unpack("@#{at + 10}vVV")
-        if [count, length, offset].include?(0xFFFF) || [length, offset].include?(0xFFFFFFFF)
+        # Zip64 — заглушки в полях: число файлов 0xFFFF, размер или смещение оглавления 0xFFFFFFFF
+        if count == 0xFFFF || [length, offset].include?(0xFFFFFFFF)
           locator = tail.unpack("@#{at - 20}VVQ<")
           raise DownloadError, "#{uri}: не найден указатель Zip64" unless locator[0] == SIGNATURES[:zip64_locator]
 

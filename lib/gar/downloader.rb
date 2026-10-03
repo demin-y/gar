@@ -53,7 +53,7 @@ module Gar
     def download_full_base(version_info, region_codes: [], tables: Gar.configuration.import_tables, on_progress: nil)
       url, version_id = version_info.values_at("GarXMLFullURL", "VersionId")
       dir   = Gar.configuration.full_base_dir
-      codes = Configuration.region_codes(region_codes)
+      codes = Configuration.region_codes(region_codes).sort # одно имя архива при любом порядке субъектов
       full  = url.to_s.empty? || codes.empty? || Gar.configuration.download_mode == :full
       return download(url, dir, version_id, on_progress) if full || File.exist?(File.join(dir, generate_filename(url, version_id)))
 

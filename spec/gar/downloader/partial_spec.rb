@@ -56,13 +56,13 @@ RSpec.describe Gar::Downloader::Partial do
 
     path = download(["43", "11"], on_progress: ->(*args) { progress << args })
 
-    expect(File.basename(path)).to eq("gar_xml_v20260116_r43_11.zip")
+    expect(File.basename(path)).to eq("gar_xml_v20260116_r11_43.zip")
     names = Zip::File.open(path) { |zip| zip.entries.map(&:name) }
     expect(names).to include("version.txt").and(include(match(%r{\A43/AS_HOUSES_\d})))
     expect(names.grep(%r{\A(77|50|80)/})).to be_empty
     expect(names.grep(/AS_STEADS/)).to be_empty # участков нет в наборе :minimal
     expect(contents(path, ["43", "11"])).to eq(contents(zip_path, ["43", "11"]))
-    expect(Gar::Archive.new(path)).to have_attributes(version_id: 20_260_116, partial: { regions: ["43", "11"], tables: tables.select(&:regional).map(&:name) })
+    expect(Gar::Archive.new(path)).to have_attributes(version_id: 20_260_116, partial: { regions: ["11", "43"], tables: tables.select(&:regional).map(&:name) })
     expect(progress.first).to eq([0, progress.last[1], :download])
     expect(progress.last[0]).to eq(progress.last[1])
   end
@@ -132,6 +132,23 @@ RSpec.describe Gar::Downloader::Partial do
     expect(File.basename(path)).to eq("gar_xml_v20260116.zip")
     expect(File.binread(path)).to eq(File.binread(zip_path))
     expect(download(["11"])).to eq(path)
+  end
+
+  it "архив с теми же субъектами в другом порядке не качает заново" do
+    serve(zip_path)
+    path = download(["43", "11"])
+    requests.clear
+
+    expect(download(["11", "43"])).to eq(path)
+    expect(File.basename(path)).to eq("gar_xml_v20260116_r11_43.zip")
+    expect(requests).to be_empty
+  end
+
+  it "сервер без размера в ответе на HEAD — как без Range: полный архив" do
+    serve(zip_path)
+    stub_request(:head, url).to_return(headers: { "Accept-Ranges" => "bytes" })
+
+    expect(File.basename(download(["43"]))).to eq("gar_xml_v20260116.zip")
   end
 
   it "download_mode :full качает весь архив и с субъектами" do
