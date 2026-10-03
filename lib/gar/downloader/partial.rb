@@ -34,7 +34,7 @@ module Gar
 
       # Файл в zip на сервере по центральному оглавлению; finish — последний байт его области на
       # сервере (до следующего файла или оглавления: данные и, возможно, дескриптор)
-      Remote = Data.define(:name, :flags, :method, :time, :date, :crc, :compressed_size, :size, :offset, :finish)
+      Remote = Data.define(:name, :flags, :compression_method, :time, :date, :crc, :compressed_size, :size, :offset, :finish)
 
       private
 
@@ -139,12 +139,12 @@ module Gar
           fields = data.unpack("@#{at}VvvvvvvVVVvvvvvVV")
           raise DownloadError, "Повреждено оглавление архива на сервере" unless fields[0] == Zip::CENTRAL_DIRECTORY_ENTRY_SIGNATURE
 
-          flags, method, time, date, crc, compressed, size, name_length, extra_length, comment_length = fields.values_at(3..12)
+          flags, compression_method, time, date, crc, compressed, size, name_length, extra_length, comment_length = fields.values_at(3..12)
           name  = data.byteslice(at + CENTRAL_HEADER, name_length).force_encoding(Encoding::UTF_8)
           extra = data.byteslice(at + CENTRAL_HEADER + name_length, extra_length)
           size, compressed, offset = zip64_values(extra, [size, compressed, fields[16]])
           at += CENTRAL_HEADER + name_length + extra_length + comment_length
-          Remote.new(name:, flags:, method:, time:, date:, crc:, compressed_size: compressed, size:, offset:, finish: nil)
+          Remote.new(name:, flags:, compression_method:, time:, date:, crc:, compressed_size: compressed, size:, offset:, finish: nil)
         end
       end
 
@@ -269,7 +269,7 @@ module Gar
         zip64 = zip64_fields(file).any?
         extra = zip64 ? [1, 16, file.size, file.compressed_size].pack("vvQ<Q<") : "".b
         sizes = zip64 ? [0xFFFFFFFF, 0xFFFFFFFF] : [file.compressed_size, file.size]
-        [Zip::LOCAL_ENTRY_SIGNATURE, zip64 ? 45 : 20, file.flags & ~DATA_DESCRIPTOR, file.method, file.time, file.date, file.crc, *sizes,
+        [Zip::LOCAL_ENTRY_SIGNATURE, zip64 ? 45 : 20, file.flags & ~DATA_DESCRIPTOR, file.compression_method, file.time, file.date, file.crc, *sizes,
          file.name.bytesize, extra.bytesize].pack("VvvvvvVVVvv") + file.name.b + extra
       end
 
@@ -278,7 +278,7 @@ module Gar
         large = zip64_fields(file, offset)
         extra = large.empty? ? "".b : [1, large.size * 8, *large.values].pack("vvQ<*")
         field = ->(key, value) { large.key?(key) ? 0xFFFFFFFF : value }
-        [Zip::CENTRAL_DIRECTORY_ENTRY_SIGNATURE, 45, large.empty? ? 20 : 45, file.flags & ~DATA_DESCRIPTOR, file.method, file.time, file.date,
+        [Zip::CENTRAL_DIRECTORY_ENTRY_SIGNATURE, 45, large.empty? ? 20 : 45, file.flags & ~DATA_DESCRIPTOR, file.compression_method, file.time, file.date,
          file.crc, field.call(:compressed_size, file.compressed_size), field.call(:size, file.size), file.name.bytesize, extra.bytesize, 0, 0, 0, 0,
          field.call(:offset, offset)].pack("VvvvvvvVVVvvvvvVV") + file.name.b + extra
       end
