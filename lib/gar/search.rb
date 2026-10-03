@@ -29,6 +29,12 @@ module Gar
                              "ao.full_adm_path, ao.full_mun_path"
     HOUSE_COLUMNS          = "h.id, h.object_id, h.object_guid, h.house_num, ht.short_name AS house_type, h.region_code, " \
                              "h.full_adm_path, h.full_mun_path"
+    # Тип дома ht — не «дом» (строение, сооружение, здание): при одинаковом номере такие ниже
+    NOT_DWELLING           = "lower(ht.name) IS DISTINCT FROM '#{HouseNumber::DWELLING}'".freeze
+    # Естественный порядок номеров домов: 2, 10, 10/2, 10а, 100 — по числу в начале номера; при
+    # одинаковом номере дом раньше строения и сооружения
+    HOUSE_ORDER            = "substring(h.house_num_norm from '^[0-9]+')::numeric NULLS LAST, h.house_num_norm, " \
+                             "h.add_num1 NULLS FIRST, h.add_num2 NULLS FIRST, #{NOT_DWELLING}".freeze
 
     attr_reader :db_conn, :schema
 
@@ -38,69 +44,21 @@ module Gar
       @schema  = schema
     end
 
-    # Полнотекстовый поиск адресных объектов: сначала совпадения по названию (точные — выше),
-    # затем — только по полному пути. autocomplete — последнее слово ищется как префикс.
-    # Шесть цифр — почтовый индекс: объекты с этим индексом и улицы его домов
+    # Полнотекстовый поиск адресных объектов: сначала совпадения по названию (запрос покрыл
+    # название целиком — выше), затем — только по полному пути. autocomplete — последнее слово
+    # ищется как префикс. Шесть цифр — почтовый индекс: объекты с этим индексом и улицы его
+    # домов. Если ничего не нашлось, а в запросе есть типы объектов («р-н», «ул»), запрос
+    # повторяется без них: тип элемента, которого нет в пути, не обнуляет поиск
     def search_address_objects(query, limit: 20, offset: 0, autocomplete: false, **scope)
       text = query.to_s.strip
       return find_by_postal_code(text, limit:, offset:, **scope) if text.match?(POSTAL_CODE)
 
-      words = Synonyms.words(text)
-      return [] if words.empty?
-
-      synonyms = self.synonyms
-      query(AddressObject, :search_address_objects, { query: }, **scope) do |sql|
-        typed = sql.bind(synonyms.tsquery(words, prefix: autocomplete))
-        exact = sql.bind(synonyms.tsquery(words))
-        bound = sql.bounds("ao")
-        first = sql.bind(limit)
-        skip  = sql.bind(offset)
-        count = "#{first}::int + #{skip}::int"
-        path  = "ao.full_#{sql.hierarchy}_path_tsv"
-        # Совпадения по пути ищутся, только если по названию не набралось limit + offset:
-        # условие на named — однократный фильтр, скан путей тогда не выполняется
-        <<~SQL
-          WITH q AS (SELECT to_tsquery('russian', #{typed}) AS typed, to_tsquery('russian', #{exact}) AS exact),
-          named AS (
-            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{RANK_COLUMNS}, 0 AS phase, ao.name_tsv @@ q.exact AS exact, 0 AS rank
-            FROM #{table(:address_objects)} ao, q
-            WHERE ao.is_active AND ao.name_tsv @@ q.typed #{bound}
-            ORDER BY exact DESC, #{RANK_ORDER}
-            LIMIT #{count}
-          ),
-          by_path AS (
-            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{RANK_COLUMNS}, 1 AS phase, #{path} @@ q.exact AS exact, ts_rank_cd(#{path}, q.typed) AS rank
-            FROM #{table(:address_objects)} ao, q
-            WHERE (SELECT count(*) FROM named) < #{count}
-              AND ao.is_active AND #{path} @@ q.typed AND NOT ao.name_tsv @@ q.typed #{bound}
-            ORDER BY exact DESC, rank DESC, #{RANK_ORDER}
-            LIMIT #{count}
-          )
-          SELECT * FROM (SELECT * FROM named UNION ALL SELECT * FROM by_path) ao
-          ORDER BY phase, exact DESC, rank DESC, #{RANK_ORDER}
-          LIMIT #{first} OFFSET #{skip}
-        SQL
-      end
+      with_words(text, offset) { |words, synonyms| address_objects(words, synonyms, query, limit:, offset:, autocomplete:, **scope) }
     end
 
-    # Полнотекстовый поиск домов по полному пути
+    # Полнотекстовый поиск домов по полному пути; типы объектов — как в search_address_objects
     def search_houses(query, limit: 20, offset: 0, autocomplete: false, **scope)
-      words = Synonyms.words(query)
-      return [] if words.empty?
-
-      synonyms = self.synonyms
-      query(House, :search_houses, { query: }, **scope) do |sql|
-        path = "h.full_#{sql.hierarchy}_path_tsv"
-        <<~SQL
-          SELECT #{HOUSE_COLUMNS}
-          FROM #{table(:houses)} h
-          CROSS JOIN to_tsquery('russian', #{sql.bind(synonyms.tsquery(words, prefix: autocomplete))}) q
-          #{house_type_joins}
-          WHERE h.is_active AND #{path} @@ q #{sql.bounds('h')}
-          ORDER BY ts_rank_cd(#{path}, q) DESC, h.house_num
-          #{sql.page(limit, offset)}
-        SQL
-      end
+      with_words(query, offset) { |words, synonyms| houses(words, synonyms, query, limit:, offset:, autocomplete:, **scope) }
     end
 
     # Каскадный поиск: регионы (без parent_guid) или прямые потомки объекта по иерархии.
@@ -133,7 +91,7 @@ module Gar
           JOIN #{table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
           #{house_type_joins}
           WHERE true #{sql.bounds('h')}
-          ORDER BY h.house_num_norm
+          ORDER BY #{HOUSE_ORDER}
           #{sql.page(limit, offset)}
         SQL
       end
@@ -284,6 +242,88 @@ module Gar
     private_constant :RANK_COLUMNS
 
     private
+
+    # Слова запроса и синонимы схемы → блок; на первой странице (offset 0) пусто, а без типов
+    # объектов слова другие — блок ещё раз без них. Дальние страницы не повторяются: пустая
+    # страница за концом выдачи не должна подменяться другой выдачей
+    def with_words(query, offset)
+      words = Synonyms.words(query)
+      return [] if words.empty?
+
+      synonyms = self.synonyms
+      found    = yield words, synonyms
+      general  = synonyms.without_types(words)
+      found.empty? && offset.zero? && general.any? && general != words ? yield(general, synonyms) : found
+    end
+
+    # Адресные объекты по словам запроса (search_address_objects)
+    def address_objects(words, synonyms, query, limit:, offset:, autocomplete:, **scope)
+      query(AddressObject, :search_address_objects, { query: }, **scope) do |sql|
+        typed = sql.bind(synonyms.tsquery(words, prefix: autocomplete))
+        exact = sql.bind(synonyms.tsquery(words))
+        last  = sql.bind(synonyms.tsquery(words.last(1), prefix: autocomplete))
+        text  = sql.bind(words.join(" "))
+        bound = sql.bounds("ao")
+        first = sql.bind(limit)
+        skip  = sql.bind(offset)
+        count = "#{first}::int + #{skip}::int"
+        hier  = sql.hierarchy
+        path  = "ao.full_#{hier}_path_tsv"
+        # Запрос покрыл название целиком (последнее слово — как введено, префиксом)
+        covered = " WHERE length(to_tsvector('russian', named.name)) <= q.lexemes"
+        # Точные совпадения выше остальных. По названию точное — запрос покрыл название целиком
+        # (в нём не больше лексем, чем в запросе): «Киров» — город, а не «автомобильная дорога
+        # Киров-Стрижи», и слова в нём — целиком: «Котельнич» — город, а не «Котельничский р-н».
+        # По пути — в названии есть последнее слово запроса («Киров, им. Кирова» — улица Кирова в
+        # Кирове), при автодополнении — как префикс: «Киров Лен» — Ленина наравне с «Ветеран (Лен)».
+        # Совпадения по пути ищутся, только если по названию не набралось limit + offset таких,
+        # что запрос покрыл название целиком, — с префиксом последнего слова, иначе при наборе
+        # «Октябрьский пр» пути сканировались бы на каждое нажатие (у запроса из одного слова —
+        # любых: все объекты с ним в названии уже нашлись). Условие на named — однократный
+        # фильтр, скан путей тогда не выполняется. Объекты без пути по
+        # иерархии запроса (муниципальные образования в административной) не отдаются
+        <<~SQL
+          WITH q AS (SELECT to_tsquery('russian', #{typed}) AS typed, to_tsquery('russian', #{exact}) AS exact,
+                            to_tsquery('russian', #{last}) AS last, length(to_tsvector('russian', #{text})) AS lexemes),
+          named AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{RANK_COLUMNS}, 0 AS phase,
+                   ao.name_tsv @@ q.exact AND length(to_tsvector('russian', ao.name)) <= q.lexemes AS exact, 0 AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE ao.is_active AND ao.name_tsv @@ q.typed AND ao.#{hier}_path_ids IS NOT NULL #{bound}
+            ORDER BY exact DESC, #{RANK_ORDER}
+            LIMIT #{count}
+          ),
+          by_path AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{RANK_COLUMNS}, 1 AS phase,
+                   COALESCE(ao.name_tsv @@ q.last, false) AS exact, ts_rank_cd(#{path}, q.typed) AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE (SELECT count(*) FROM named, q#{covered if words.size > 1}) < #{count}
+              AND ao.is_active AND #{path} @@ q.typed AND NOT ao.name_tsv @@ q.typed #{bound}
+            ORDER BY exact DESC, rank DESC, #{RANK_ORDER}
+            LIMIT #{count}
+          )
+          SELECT * FROM (SELECT * FROM named UNION ALL SELECT * FROM by_path) ao
+          ORDER BY exact DESC, phase, rank DESC, #{RANK_ORDER}
+          LIMIT #{first} OFFSET #{skip}
+        SQL
+      end
+    end
+
+    # Дома по словам запроса (search_houses)
+    def houses(words, synonyms, query, limit:, offset:, autocomplete:, **scope)
+      query(House, :search_houses, { query: }, **scope) do |sql|
+        path = "h.full_#{sql.hierarchy}_path_tsv"
+        <<~SQL
+          SELECT #{HOUSE_COLUMNS}
+          FROM #{table(:houses)} h
+          CROSS JOIN to_tsquery('russian', #{sql.bind(synonyms.tsquery(words, prefix: autocomplete))}) q
+          #{house_type_joins}
+          WHERE h.is_active AND #{path} @@ q #{sql.bounds('h')}
+          ORDER BY ts_rank_cd(#{path}, q) DESC, #{HOUSE_ORDER}
+          #{sql.page(limit, offset)}
+        SQL
+      end
+    end
 
     # Объекты с почтовым индексом (параметр 5) и родители домов с ним — улицы индекса.
     # Без таблиц параметров — пустой ответ

@@ -30,6 +30,18 @@ RSpec.describe Gar::Database do
       conn&.close
     end
 
+    it "сохраняет options из адреса базы и у пула, и у соединений импорта" do
+      separator = Gar.configuration.database_url.include?("?") ? "&" : "?"
+      Gar.configuration.database_url += "#{separator}options=-c%20search_path%3Dgar_test_path"
+
+      expect(Gar.with_connection { _1.exec("SHOW search_path").getvalue(0, 0) }).to eq("gar_test_path")
+      conn = described_class.create_connection
+      expect(conn.exec("SHOW search_path").getvalue(0, 0)).to eq("gar_test_path")
+      expect(conn.exec("SHOW client_min_messages").getvalue(0, 0)).to eq("warning")
+    ensure
+      conn&.close
+    end
+
     it "пересоздаёт пул, когда меняются его настройки" do
       expect(Gar.with_connection { _1.exec("SHOW statement_timeout").getvalue(0, 0) }).to eq("1s")
 

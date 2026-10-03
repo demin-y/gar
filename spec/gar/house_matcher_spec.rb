@@ -22,6 +22,8 @@ RSpec.describe Gar::HouseMatcher, :db do
     ["14", { building: "1", structure: "3" }] => [:exact, 4_300_106],
     ["18б"]                                   => [:exact, 4_300_108], # литера — часть номера
     ["18", { letter: "Б" }]                   => [:exact, 4_300_108],
+    ["18 лит. Б"]                             => [:exact, 4_300_108], # литера словом
+    ["д. 10, кв. 5"]                          => [:exact, 4_300_101], # помещение отбрасывается
     ["14"]                                    => [:fuzzy, 4_300_106], # единственный 14, у него корпус и строение
     ["14", { building: "1" }]                 => [:fuzzy, 4_300_106],
     ["12"]                                    => [:none, nil],        # 12 к. 2 и 12 стр. 1 — неоднозначно
@@ -48,6 +50,11 @@ RSpec.describe Gar::HouseMatcher, :db do
     expect(match("10", street: 1_100_010).house.gar_object_id).to eq(1_100_101)
     expect(match("5", street: 4_300_010).status).to eq(:none)
     expect(match("93", street: 828_325, hierarchy: :mun)).to have_attributes(status: :exact, house: have_attributes(gar_object_id: 44_870_981))
+  end
+
+  it "из домов с одним номером («д. 40» и «зд. 40») выбирает тип «дом»" do
+    expect(match("40", street: 4_300_011)).to have_attributes(status: :exact, house: have_attributes(gar_object_id: 4_300_204))
+    expect(match("40", street: 4_300_011).alternatives.map(&:gar_object_id)).to eq([4_300_203])
   end
 
   it "для неизвестной улицы или некорректного GUID — :none" do

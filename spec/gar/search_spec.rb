@@ -47,6 +47,21 @@ RSpec.describe Gar::Search, :db do
       expect(names("Кир", autocomplete: true)).to include("Кировский", "Кировская")
     end
 
+    it "выше ставит объект, название которого запрос покрыл целиком: «Киров» — город, а не автодорога «Киров-Стрижи»" do
+      expect(names("Киров", autocomplete: true).first(4)).to eq(["Киров", "Кировская", "Кировский", "автомобильная дорога Киров-Стрижи"])
+    end
+
+    it "отдаёт только объекты иерархии запроса: муниципальное образование — в муниципальной" do
+      expect(names("город Киров")).not_to include("город Киров")
+      expect(names("город Киров", hierarchy: :mun)).to include("город Киров")
+    end
+
+    it "если ничего не нашлось, повторяет запрос без типов объектов, которых нет в пути" do
+      expect(names("Нововятский р-н Советская")).to eq(["Советская (Нововятский)"])
+      expect(search.search_houses("Киров Нововятский р-н Советская 1").map(&:gar_object_id)).to eq([4_300_202])
+      expect(names("р-н")).to be_empty
+    end
+
     it "по шести цифрам ищет объекты с почтовым индексом и улицы его домов" do
       expect(names("610000")).to eq(["Ленина"])
       expect(names("610017")).to eq(["Ленина"])
@@ -82,6 +97,12 @@ RSpec.describe Gar::Search, :db do
         class: Gar::House, gar_object_id: 4_300_104, house_num: "12", house_type: "д.",
         full_adm_path: "Кировская обл, Киров г, Ленина ул, д. 12 к. 2"
       )
+    end
+  end
+
+  describe "#find_houses" do
+    it "упорядочивает номера по числу в начале, а не как текст: 5 раньше 40" do
+      expect(search.find_houses(street_guid).map(&:house_num)).to eq(["5", "40", "40"])
     end
   end
 

@@ -14,10 +14,16 @@ RSpec.describe Gar::HouseNumber do
     "14 корпус 1 строение 3" => ["14", "1", "3"],
     "5 стр. 1б"              => ["5", nil, "1б"],
     "10 к"                   => ["10к", nil, nil],
-    "10A k2"                 => ["10а", "2", nil]
+    "10A k2"                 => ["10а", "2", nil],
+    "10 лит. А"              => ["10а", nil, nil],
+    "18 литер Б к 1"         => ["18б", "1", nil],
+    "10 литера"              => nil,
+    "10 кв. 5"               => ["10", nil, nil],
+    "12 к. 2 оф. 3"          => ["12", "2", nil],
+    "7а, пом. 1н"            => ["7а", nil, nil]
   }.each do |text, (number, building, structure)|
     it "разбирает «#{text}»" do
-      expect(described_class.parse(text)).to eq(described_class.new(number:, building:, structure:))
+      expect(described_class.parse(text)).to eq(number && described_class.new(number:, building:, structure:))
     end
   end
 

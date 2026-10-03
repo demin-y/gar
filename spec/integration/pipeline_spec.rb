@@ -31,9 +31,9 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       counts = Gar.configuration.import_tables.to_h { |table| [table.name, table_count(import_schema, table.name)] }
       expect(counts).to eq(
-        object_levels: 9, address_object_types: 9, house_types: 2, add_house_types: 3, apartment_types: 1, room_types: 1,
+        object_levels: 9, address_object_types: 11, house_types: 2, add_house_types: 3, apartment_types: 1, room_types: 1,
         operation_types: 0, param_types: 5, normative_docs_kinds: 0, normative_docs_types: 0,
-        address_objects: 19, addr_obj_params: 4, adm_hierarchy: 27, mun_hierarchy: 30, houses: 12, house_params: 3
+        address_objects: 21, addr_obj_params: 4, adm_hierarchy: 32, mun_hierarchy: 35, houses: 15, house_params: 3
       )
     end
 
@@ -69,7 +69,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       expect(db_connection.exec("SELECT 1").getvalue(0, 0)).to eq("1")
       expect(importer.db_conn.exec("SELECT 1").getvalue(0, 0)).to eq("1")
-      expect(table_count(import_schema, "houses")).to eq(12)
+      expect(table_count(import_schema, "houses")).to eq(15)
     end
 
     it "импортирует действующие параметры нужных типов из файлов *_PARAMS (ошибка 2)" do
@@ -92,7 +92,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       expect(importer.import_full_base(zip_path, schema: import_schema)).to eq(import_schema) # та же загрузка: схема не нужна заново
       expect { importer.import_full_base(zip_path, schema: import_schema, region_codes: ["43"]) }.to raise_error(Gar::ImportError, /текущая/)
-      expect(table_count(import_schema, "houses")).to eq(12)
+      expect(table_count(import_schema, "houses")).to eq(15)
     end
 
     it "не использует остатки распаковки прерванного импорта 1.x (ошибка 4)" do
@@ -103,7 +103,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       importer.import_full_base(zip_path)
 
-      expect(table_count(import_schema, "houses")).to eq(12)
+      expect(table_count(import_schema, "houses")).to eq(15)
     end
   end
 
@@ -132,7 +132,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
     it "отмечает дома города по OBJECTID в пути (задел под поиск в границах, Т6)" do
       in_kirov = db_connection.exec("SELECT object_id FROM #{schema}.houses WHERE mun_path_ids @> ARRAY[4300002::bigint]")
 
-      expect(in_kirov.column_values(0).map(&:to_i)).to contain_exactly(*(4_300_101..4_300_108), 4_300_201)
+      expect(in_kirov.column_values(0).map(&:to_i)).to contain_exactly(*(4_300_101..4_300_108), 4_300_201, 4_300_202, 4_300_203, 4_300_204)
     end
 
     it "без муниципальной иерархии строит только административные пути, а поиск по ней — ошибка настройки" do
@@ -165,8 +165,8 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
     it "сначала отдаёт совпадения по названию, затем по пути, с общей пагинацией" do
       found = search.search_address_objects("Киров")
 
-      expect(found.first(2).map(&:name)).to contain_exactly("Киров", "город Киров")
-      expect(found.drop(2).map(&:name)).to contain_exactly("Ленина", "Воровского", "Октябрьский", "Большая Садовая")
+      expect(found.first(2).map(&:name)).to eq(["Киров", "автомобильная дорога Киров-Стрижи"])
+      expect(found.drop(2).map(&:name)).to contain_exactly("Ленина", "Воровского", "Октябрьский", "Большая Садовая", "Советская (Нововятский)")
       expect(search.search_address_objects("Киров", limit: 2, offset: 1)).to eq(found[1, 2])
     end
 
@@ -182,7 +182,8 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
     it "отдаёт регионы и прямых потомков по иерархии" do
       expect(search.find_address_objects.map(&:name)).to contain_exactly("Кировская", "Коми", "Москва", "Московская")
-      expect(search.find_address_objects(parent_guid: guid(4_300_003)).map(&:name)).to eq(["Большая Садовая", "Воровского", "Ленина", "Октябрьский"])
+      expect(search.find_address_objects(parent_guid: guid(4_300_003)).map(&:name))
+        .to eq(["автомобильная дорога Киров-Стрижи", "Большая Садовая", "Воровского", "Ленина", "Октябрьский", "Советская (Нововятский)"])
     end
 
     it "отдаёт активные дома улицы по номеру" do
@@ -213,7 +214,7 @@ RSpec.describe "Конвейер ГАР на синтетическом архи
 
       expect(schema_exists?(current_schema)).to be(true)
       expect(schema_exists?("#{current_schema}_v20260116")).to be(false)
-      expect(table_count(current_schema, "houses")).to eq(12)
+      expect(table_count(current_schema, "houses")).to eq(15)
     end
 
     it "сохраняет прежнюю текущую схему как резервную с её версией" do

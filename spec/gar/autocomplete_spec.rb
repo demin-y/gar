@@ -25,6 +25,22 @@ RSpec.describe Gar::Autocomplete, :db do
     expect(suggest("Ленина 10", within: guid(1_100_003)).map(&:gar_object_id)).to eq([1_100_101, 1_100_010])
   end
 
+  {
+    "Киров, ул. Ленина, д. 10"     => 4_300_101, # «д» перед номером — дом, а не «деревня»
+    "г Киров ул Ленина дом 10а"    => 4_300_102,
+    "Ленина 18 лит. Б"             => 4_300_108,
+    "Ленина 10, кв. 5"             => 4_300_101, # помещение отбрасывается
+    "Ленина д. 12 корп. 2 оф. 301" => 4_300_104
+  }.each do |query, object_id|
+    it "понимает строку адреса «#{query}»" do
+      expect(suggest(query, region_codes: ["43"]).first).to have_attributes(kind: :house, gar_object_id: object_id)
+    end
+  end
+
+  it "при одинаковом номере ставит дом раньше здания" do
+    expect(suggest("Воровского 40").first(2).map { [_1.gar_object_id, _1.name] }).to eq([[4_300_204, "д. 40"], [4_300_203, "зд. 40"]])
+  end
+
   it "ищет по иерархии запроса и отдаёт сериализуемые элементы" do
     found = suggest("Тихонова 93", hierarchy: :mun).first
 

@@ -48,7 +48,7 @@ RSpec.describe Gar::TestSupport, :db do
 
       described_class.load_fixtures(db_connection, schema:)
 
-      expect(table_count(schema, "houses")).to eq(12)
+      expect(table_count(schema, "houses")).to eq(15)
     end
 
     it "не трогает схему с другими данными" do

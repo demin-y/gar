@@ -16,8 +16,10 @@ RSpec.describe Gar::PathBuilder, :db do
     rows.each { db_connection.exec_params("INSERT INTO #{schema}.#{table} (#{columns.join(', ')}) VALUES (#{placeholders})", _1) }
   end
 
+  # Строки иерархии: OBJECTID → PATH, родитель — предпоследний элемент пути
   def hierarchy(table, paths)
-    insert(table, [:id, :object_id, :path, :is_active], *paths.each_with_index.map { |(object_id, path), id| [id + 1, object_id, path, true] })
+    insert(table, [:id, :object_id, :parent_obj_id, :path, :is_active],
+           *paths.each_with_index.map { |(object_id, path), id| [id + 1, object_id, path.split(".")[-2], path, true] })
   end
 
   def paths(table, column)
