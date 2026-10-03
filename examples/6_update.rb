@@ -9,11 +9,10 @@
 
 require_relative "example_helper"
 
-before = Gar.current_version&.version_id
 result = Gar.update!(on_progress: progress)
 case result.kind
 when :none  then puts "ГАР актуален: версия #{result.to_version}"
-when :delta then puts "Применены дельты #{result.versions.join(', ')}: #{before} → #{result.to_version}"
-else puts "Полный импорт (#{result.reason}): #{before || '—'} → #{result.to_version}"
+when :delta then puts "Применены дельты #{result.versions.join(', ')}: #{result.from_version} → #{result.to_version}"
+else puts "Полный импорт (#{result.reason}): #{result.from_version || '—'} → #{result.to_version}"
 end
 Gar.status.updates.first(3).each { puts "  дельта #{_1.version_id}: +#{_1.upserted} −#{_1.deleted}, #{_1.applied_at}" }

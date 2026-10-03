@@ -203,7 +203,6 @@ RSpec.describe Gar::Downloader do
     before { FileUtils.mkdir_p(temp_dir) }
 
     it "не считает дублями полный и частичные архивы одной версии" do
-      FileUtils.mkdir_p(temp_dir)
       names = ["gar_xml_v20261002.zip", "gar_xml_v20261002_r11_43.zip", "gar_xml_v20261002_r77.zip"]
       names.each_with_index { |name, index| FileUtils.touch(File.join(temp_dir, name), mtime: Time.now - index) }
 

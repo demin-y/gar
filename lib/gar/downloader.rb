@@ -282,33 +282,17 @@ module Gar
           path:    path,
           mtime:   File.mtime(path),
           size:    File.size(path),
-          version: extract_version_from_filename(path),
-          # Состав архива — имя без версии: полный, частичный с субъектами, дельта
-          kind:    File.basename(path).sub(/_v\d+/, "")
+          version: extract_version_from_filename(path)
         }
       end
     end
 
-    def find_files_to_delete(zip_files, keep_days, keep_versions) # rubocop:disable Metrics/PerceivedComplexity
-      files_to_delete = []
-
-      files_by_version = zip_files.group_by { |f| f[:version] }.sort_by { |version, _| version || 0 }.reverse
-
-      files_by_version.each_with_index do |(_version, files), index|
-        if index >= keep_versions
-          files_to_delete.concat(files)
-        else
-          # Из архивов одной версии и одного состава — самый новый; полный и частичные архивы
-          # одной версии (разные субъекты) — не дубли друг друга
-          files.group_by { |f| f[:kind] }.each_value { |same| files_to_delete.concat(same.sort_by { |f| f[:mtime] }.reverse.drop(1)) }
-        end
-      end
-
+    # Архивы версий старше keep_versions последних и файлы старше keep_days дней. Архивы
+    # оставляемых версий хранятся все: полный и частичные (разные субъекты) — не дубли
+    def find_files_to_delete(zip_files, keep_days, keep_versions)
+      by_version  = zip_files.group_by { |f| f[:version] }.sort_by { |version, _| version || 0 }.reverse
       cutoff_time = Time.now - (keep_days * SECONDS_PER_DAY)
-      old_files = zip_files.select { |f| f[:mtime] < cutoff_time }
-      files_to_delete.concat(old_files)
-
-      files_to_delete.uniq
+      (by_version.drop(keep_versions).flat_map(&:last) + zip_files.select { |f| f[:mtime] < cutoff_time }).uniq
     end
 
     def report_files_to_delete(files_to_delete)

@@ -8,6 +8,6 @@
 
 require_relative "example_helper"
 
-schema = ARGV[0] || Gar.configuration.database_schema
+schema = ARGV[0] or abort "Укажите схему: #{$PROGRAM_NAME} gar_v<версия> (её имя печатает 2_import_full_base.rb)"
 count  = Gar.build_paths(schema, on_progress: progress)
 puts "Пути схемы #{schema} построены: #{count} записей. Дальше: examples/4_switch_to_imported_schema.rb #{schema}"

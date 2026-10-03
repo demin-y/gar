@@ -18,8 +18,7 @@ begin
   uri  = URI(versions.last["GarXMLFullURL"])
   head = Net::HTTP.start(uri.host, uri.port, use_ssl: true, ca_file: Gar.configuration.api_ca_file) { _1.head(uri.path) }
   puts "Файловый сервер: #{head.code}, архив #{Gar::Utils.format_size(head.content_length)}, Range: #{head['Accept-Ranges'] == 'bytes' ? 'есть' : 'нет'}"
-rescue OpenSSL::SSL::SSLError => e
-  abort "Ошибка SSL (#{e.message}): укажите сертификат УЦ в GAR_CA_FILE"
-rescue Gar::Error => e
-  abort "Ошибка: #{e.message}"
+rescue Gar::Error, OpenSSL::SSL::SSLError => e
+  # Ошибку SSL API загрузчик повторяет и отдаёт как Gar::DownloadError с её текстом
+  abort "Ошибка: #{e.message}#{"\nСертификат не проверен: укажите сертификат УЦ в GAR_CA_FILE" if e.message.include?('SSL')}"
 end

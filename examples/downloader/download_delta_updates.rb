@@ -10,7 +10,7 @@
 require_relative "../example_helper"
 
 downloader = Gar::Downloader.new
-info = ARGV[0] ? downloader.version_info(Integer(ARGV[0])) : downloader.latest_version
+info = version_from_argv(downloader)
 abort "У выгрузки #{info['VersionId']} нет дельты" if info["GarXMLDeltaURL"].to_s.empty?
 
 zip = downloader.download_delta(info, on_progress: progress)
