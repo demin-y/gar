@@ -25,17 +25,13 @@ CTX = ssl._create_unverified_context() if "--insecure" in argv else None
 SRC, REGIONS = args[0], args[1:] or ["43", "11"]
 
 
-def http(url, rng):
-    req = urllib.request.Request(url, headers={"Range": f"bytes={rng}"})
-    return urllib.request.urlopen(req, context=CTX, timeout=60)
-
-
 def fetch(url, rng, attempts=8):
     """Кусок файла (статус, заголовки, данные); файловый сервер ФНС временами отвечает 5xx или
     рвёт связь — повтор с растущей паузой"""
     for attempt in range(attempts):
         try:
-            with http(url, rng) as r:
+            req = urllib.request.Request(url, headers={"Range": f"bytes={rng}"})
+            with urllib.request.urlopen(req, context=CTX, timeout=60) as r:
                 return r.status, r.headers, r.read()
         except (urllib.error.HTTPError, OSError, http_client.HTTPException) as e:
             if attempt == attempts - 1 or (isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code != 429):

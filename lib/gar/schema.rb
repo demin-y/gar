@@ -14,6 +14,8 @@ module Gar
 
     # Тип параметра «почтовый индекс» (PARAM TYPEID): по нему частичный индекс таблиц параметров
     POSTAL_CODE_PARAM = 5
+    # Тип параметра «Административный центр субъекта РФ»: признак is_capital для ранжирования
+    CAPITAL_PARAM = 22
 
     def self.quote(identifier) = PG::Connection.quote_ident(identifier.to_s)
 

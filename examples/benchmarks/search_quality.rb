@@ -13,6 +13,7 @@
 require "bundler/setup"
 require "gar"
 require "yaml"
+require_relative "support"
 
 MARKS   = { 1 => "✓", 2 => "2", 3 => "3" }.freeze
 verbose = ARGV.delete("--verbose")
@@ -22,9 +23,8 @@ Gar.configuration.logger = Logger.new($stderr, level: :warn)
 
 results =
   queries.map do |item|
-    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    found   = Gar.autocomplete(item[:query], limit: 10)
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    found   = nil
+    elapsed = Benchmarks.timed { found = Gar.autocomplete(item[:query], limit: 10) }
     { **item, found:, elapsed:, place: found.index { _1.address == item[:expect] }&.+(1) }
   end
 
@@ -35,8 +35,7 @@ results.each do |result|
   result[:found].first(5).each { puts "            #{_1.address || _1.name}" } if verbose && result[:place] != 1
 end
 
-times = results.map { _1[:elapsed] * 1000 }.sort
 share = ->(limit) { results.count { _1[:place] && _1[:place] <= limit } * 100.0 / results.size }
 puts format("hit@1 %<hit1>.0f %%, hit@3 %<hit3>.0f %% из %<count>d; p50 %<p50>.1f мс, p95 %<p95>.1f мс",
-            hit1: share.call(1), hit3: share.call(3), count: results.size, p50: times[times.size / 2], p95: times[(times.size * 0.95).floor])
+            hit1: share.call(1), hit3: share.call(3), count: results.size, **Benchmarks.percentiles(results.map { _1[:elapsed] }).slice(:p50, :p95))
 exit(results.all? { _1[:place] && _1[:place] <= 3 } ? 0 : 1)

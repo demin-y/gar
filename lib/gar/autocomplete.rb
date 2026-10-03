@@ -76,7 +76,7 @@ module Gar
             AND starts_with(n.number, #{exact}) #{parts.join(' ')}
           ORDER BY n.number = #{exact} DESC, (h.add_num1 IS NULL AND h.add_num2 IS NULL) DESC,
                    array_position(#{ids}, hier.parent_obj_id), length(n.number), n.number, h.add_num1, h.add_num2,
-                   lower(ht.name) IS DISTINCT FROM '#{HouseNumber::DWELLING}'
+                   #{Search::NOT_DWELLING}
           LIMIT #{sql.bind(limit)}
         SQL
       end

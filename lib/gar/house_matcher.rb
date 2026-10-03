@@ -23,7 +23,7 @@ module Gar
       Data.define(:house, :number, :parts, :dwelling) do
         def self.from_row(row)
           number, parts = HouseNumber.of_house(row["house_num"], [row.values_at("add_name1", "add_num1"), row.values_at("add_name2", "add_num2")])
-          new(house: House.from_row(row), number:, parts:, dwelling: row["house_type_name"]&.downcase == HouseNumber::DWELLING)
+          new(house: House.from_row(row), number:, parts:, dwelling: row["dwelling"] == "t")
         end
       end
 
@@ -60,7 +60,8 @@ module Gar
     def candidates(street_guid, wanted, hierarchy)
       search.query(Candidate, :match_house, { street_guid: }, hierarchy:) do |sql|
         <<~SQL
-          SELECT #{Search::HOUSE_COLUMNS}, ht.name AS house_type_name, h.add_num1, a1.name AS add_name1, h.add_num2, a2.name AS add_name2
+          SELECT #{Search::HOUSE_COLUMNS}, NOT (#{Search::NOT_DWELLING}) AS dwelling, h.add_num1, a1.name AS add_name1, h.add_num2,
+                 a2.name AS add_name2
           FROM #{sql.children(street_guid)}
           JOIN #{search.table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
           #{search.house_type_joins}

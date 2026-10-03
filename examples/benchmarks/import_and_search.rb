@@ -13,6 +13,7 @@
 require "bundler/setup"
 require "gar"
 require "optparse"
+require_relative "support"
 
 options = { schema: "gar_bench", queries: 100, skip_import: false }
 OptionParser.new do |parser|
@@ -25,25 +26,16 @@ zip_path = ARGV.first or abort("Укажите архив: #{$PROGRAM_NAME} АР
 schema   = options[:schema]
 
 def measure(title, &)
-  puts format("%<title>-28s %<seconds>8.1f с", title:, seconds: timed(&))
+  puts format("%<title>-28s %<seconds>8.1f с", title:, seconds: Benchmarks.timed(&))
 end
 
 def percentiles(title, samples)
-  sorted = samples.sort
-  at     = ->(share) { sorted[((sorted.size - 1) * share).round] * 1000 }
   puts format("%<title>-28s p50 %<p50>6.1f мс  p95 %<p95>6.1f мс  max %<max>6.1f мс  (%<count>d)",
-              title:, p50: at.call(0.5), p95: at.call(0.95), max: sorted.last * 1000, count: sorted.size)
-end
-
-def timed
-  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  yield
-  Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+              title:, **Benchmarks.percentiles(samples), count: samples.size)
 end
 
 Gar.configuration.logger = Logger.new($stderr, level: :warn)
 conn = Gar::Database.create_connection
-conn.exec("SET client_min_messages = warning")
 
 unless options[:skip_import]
   conn.exec("DROP SCHEMA IF EXISTS #{Gar::Schema.quote(schema)} CASCADE")
@@ -75,5 +67,5 @@ queries = {
   "autocomplete: в городе"  => ->(s) { complete.call("#{s[:name]} 1", within: s[:city]) },
   "address по GUID дома"    => ->(s) { address.call(s[:house]) }
 }
-queries.each { |title, query| percentiles(title, streets.map { |street| timed { query.call(street) } }) }
+queries.each { |title, query| percentiles(title, streets.map { |street| Benchmarks.timed { query.call(street) } }) }
 conn.close
