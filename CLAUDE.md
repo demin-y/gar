@@ -47,7 +47,14 @@ bundle exec rspec                          # все тесты; :slow — с GAR
 bundle exec rspec spec/integration         # сквозной конвейер на синтетическом архиве
 bundle exec rubocop
 python3 examples/tools/gar_toc.py <zip|URL> 43 11   # оглавление архива ГАР без распаковки
+ruby examples/tools/check_consistency.rb gar        # реальные данные: инварианты, пересчёт путей и рангов
+ruby examples/tools/compare_schemas.rb gar gar_full # две схемы: цепочка дельт против полной выгрузки
+ruby examples/benchmarks/search_quality.rb          # качество автодополнения (queries_43_11.yml)
 ```
+
+На macOS в адрес базы — `?gssencmode=disable` (libpq с Kerberos падает после fork). К
+fias-file.nalog.ru — только последовательно и редко: на сотни быстрых запросов сервер включает
+защиту от ботов (503) примерно на час.
 
 `TEST_DATABASE_URL` по умолчанию `postgresql://postgres:postgres@localhost:6433/gar_db_test`.
 

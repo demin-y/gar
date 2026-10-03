@@ -43,7 +43,7 @@ module Gar
       @full_base_dir               = "./downloads/full_base"
       @delta_dir                   = "./downloads/delta"
       @api_ssl_verify              = true
-      # Сертификат УЦ сайтов ФНС (PEM), если его нет в хранилище ОС: проверка SSL остаётся
+      # Свой сертификат УЦ (PEM) для сайтов ФНС — прокси, российский УЦ — если его нет в ОС: проверка SSL остаётся
       @api_ca_file                 = nil
       # Gar.update! удаляет применённые дельты и полные архивы старее загруженного
       @cleanup_downloads           = true
