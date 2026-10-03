@@ -66,7 +66,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "address_objects")).to eq(22)
+      expect(table_count(schema, "address_objects")).to eq(24)
       expect(values("addr_obj_params")).to eq(["1", "2", "3", "4", "31"])
     end
 
@@ -97,7 +97,7 @@ RSpec.describe Gar::Importer, :db do
 
       expect(values("houses", "region_code")).to eq(["11", "43"])
       expect(values("address_objects", "region_code")).to eq(["11", "43"])
-      expect(table_count(schema, "address_object_types")).to eq(9)
+      expect(table_count(schema, "address_object_types")).to eq(11)
       expected = Gar::Archive.new(zip_path).jobs(Gar.configuration.import_tables, region_codes: ["43", "11"]).sum(&:size)
       expect(progress.last).to eq([expected, expected])
     end
@@ -121,7 +121,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
       expect(hierarchy_objects.call).to be_empty
-      expect(table_count(schema, "adm_hierarchy")).to eq(27)
+      expect(table_count(schema, "adm_hierarchy")).to eq(32)
 
       Gar.configuration.preset = :extended
       import
@@ -140,7 +140,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([19, 12, 27, 3])
+      expect(["address_objects", "houses", "adm_hierarchy", "house_params"].map { table_count(schema, _1) }).to eq([21, 15, 32, 3])
     end
   end
 
@@ -204,7 +204,7 @@ RSpec.describe Gar::Importer, :db do
 
       import
 
-      expect(table_count(schema, "houses")).to eq(12)
+      expect(table_count(schema, "houses")).to eq(15)
     end
 
     it "на повреждённом файле бросает ImportError с именем файла" do
@@ -240,8 +240,8 @@ RSpec.describe Gar::Importer, :db do
       importer.switch_to_imported_schema(import)
       importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
 
-      expect(table_count(current, "houses")).to eq(12)
-      expect(table_count("#{current}_backup_v20260116", "houses")).to eq(12)
+      expect(table_count(current, "houses")).to eq(15)
+      expect(table_count("#{current}_backup_v20260116", "houses")).to eq(15)
       expect(schema_exists?(schema)).to be(false)
     end
 
@@ -264,7 +264,7 @@ RSpec.describe Gar::Importer, :db do
       Gar.configuration.keep_backups = 0
       importer.switch_to_imported_schema(importer.import_full_base(zip_path, schema: isolated_schema("gar_import")))
       expect(Gar::Schemas.backups(db_connection, current)).to eq([])
-      expect(table_count(current, "houses")).to eq(12)
+      expect(table_count(current, "houses")).to eq(15)
     end
 
     it "отвергает пустое имя и несуществующую схему, текущую оставляет как есть" do

@@ -17,8 +17,12 @@ module Gar
     # Таблица после пакетных UPDATE растёт вдвое: VACUUM возвращает место под следующие батчи
     VACUUM_EVERY_N_BATCHES = 50
     BATCH_SIZE             = 25_000
-    # Временная таблица rebuild: объекты, у которых пересчитываются ранги
-    RANKED = "pg_temp.gar_rebuild_objects"
+    # Параметр «Административный центр субъекта РФ» (AS_PARAM_TYPES)
+    CAPITAL_PARAM          = 22
+    # Временные таблицы rebuild: объекты, у которых пересчитывается признак центра, и изменение
+    # числа домов адресных объектов
+    RANKED       = "pg_temp.gar_rebuild_objects"
+    HOUSE_COUNTS = "pg_temp.gar_house_counts"
 
     # Номер дома с типами: тип пишется, только если есть его номер
     HOUSE_NUMBER = <<~SQL
@@ -45,22 +49,27 @@ module Gar
       Database.with_lock(db_conn, "Построение путей схемы #{schema}") { build_paths(batch_size, on_progress) }
     end
 
-    # Очищает пути объектов object_ids (OBJECTID) и всех их потомков — записей, в пути которых
-    # они есть, — чтобы build пересобрал их: после переименования, переноса в иерархии или
+    # Очищает пути объектов object_ids (OBJECTID) и всех их потомков по загруженным иерархиям
+    # (PARENTOBJID), чтобы build пересобрал их: после переименования, переноса в иерархии или
     # удаления объекта. Возвращает число очищенных записей
     def invalidate(object_ids)
       return 0 if hierarchies.empty?
 
       Database.with_lock(db_conn, "Очистка путей схемы #{schema}") do
-        tables.sum { db_conn.exec_params("UPDATE #{qualified(_1)} SET #{reset_paths} WHERE #{subtree}", [ids_param(object_ids)]).cmd_tuples }
+        Database.transaction(db_conn) do
+          objects = descendants(object_ids, "cleared")
+          tables.sum { db_conn.exec("UPDATE #{qualified(_1)} SET #{reset_paths} WHERE id IN (SELECT id FROM #{rows(_1, objects)})").cmd_tuples }
+        end
       end
     end
 
     # Пересборка после изменения данных (дельта): блок меняет записи объектов object_ids, затем
-    # пути этих объектов и их потомков строятся заново, а у адресных объектов, в поддереве
-    # которых были или стали эти записи, и у объектов param_object_ids (изменились параметры)
-    # пересчитываются ранги. Всё — в одной транзакции (в открытой — в ней же) и без VACUUM:
-    # читатели видят пути до изменения или после. Возвращает число записей с новыми путями
+    # пути этих объектов и их потомков строятся заново. Число домов адресных объектов меняется
+    # на разницу «после − до» по домам этого поддерева (а не пересчитывается по всем домам их
+    # предков — субъекта целиком); признак центра пересчитывается у объектов путей поддерева и
+    # у param_object_ids (изменились параметры). Всё — в одной транзакции (в открытой — в ней
+    # же) и без VACUUM: читатели видят пути до изменения или после. Возвращает число записей с
+    # новыми путями
     def rebuild(object_ids, param_object_ids: [])
       Database.with_lock(db_conn, "Пересборка путей схемы #{schema}") do
         Database.transaction(db_conn) do
@@ -69,13 +78,16 @@ module Gar
             next 0
           end
 
-          ids = ids_param(object_ids)
+          houses = tables.include?(:houses)
           scope_table(RANKED, param_object_ids)
-          add_ancestors(subtree, [ids]) # до изменения: записи могут уйти из поддерева или исчезнуть
+          # До изменения: записи могут уйти из поддерева или исчезнуть
+          before = descendants(object_ids, "before").then { |objects| tables.to_h { [_1, rows(_1, objects)] } }
+          before.each { |table, changed| add_ancestors(table, changed) }
+          count_houses(before[:houses], ids: ids_param(object_ids)) if houses
           yield
-          rebuild_paths(ids).tap do
+          rebuild_paths(descendants(object_ids, "after")).tap do
             db_conn.exec("ANALYZE #{RANKED}")
-            update_ranks(scope: RANKED) if tables.include?(:houses)
+            update_ranks(scope: RANKED) if houses
           end
         end
       end
@@ -146,24 +158,73 @@ module Gar
     end
 
     # Очищает пути поддерева ids и заполняет их заново батчами по списку очищенных записей (без
-    # индекса пустых путей и VACUUM); предки пересобранных записей — в RANKED
-    def rebuild_paths(ids)
+    # индекса пустых путей и VACUUM); предки пересобранных записей — в RANKED, их дома — в
+    # изменение числа домов
+    def rebuild_paths(objects)
       tables.sum do |table|
-        scope = scope_table("pg_temp.gar_rebuild_#{table}")
-        db_conn.exec_params("WITH r AS (UPDATE #{qualified(table)} SET #{reset_paths} WHERE #{subtree} RETURNING id) " \
-                            "INSERT INTO #{scope} SELECT id FROM r", [ids])
-        db_conn.exec("ANALYZE #{scope}")
-        each_batch(batch_sql(table, scope), BATCH_SIZE).tap { add_ancestors("id IN (SELECT id FROM #{scope})", [], only: table) }
+        changed = rows(table, objects)
+        db_conn.exec("UPDATE #{qualified(table)} SET #{reset_paths} WHERE id IN (SELECT id FROM #{changed})")
+        each_batch(batch_sql(table, changed), BATCH_SIZE).tap do
+          add_ancestors(table, changed)
+          count_houses(changed, sign: 1) if table == :houses
+        end
       end
     end
 
-    # Объекты путей (предки и сами записи) записей таблиц с путями, отобранных condition, — в RANKED
-    def add_ancestors(condition, params, only: nil)
-      ids =
-        (only ? [only] : tables).product(hierarchies).map do |table, hierarchy|
-          "SELECT unnest(#{hierarchy}_path_ids) FROM #{qualified(table)} WHERE #{condition}"
-        end
-      db_conn.exec_params("INSERT INTO #{RANKED} #{ids.join(' UNION ')} ON CONFLICT DO NOTHING", params)
+    # Объекты object_ids и их потомки по загруженным иерархиям — во временную таблицу
+    # pg_temp.gar_<label>_objects. Обход по уровням: маленькая таблица уровня соединяется с
+    # иерархиями по индексу parent_obj_id, поэтому время зависит от размера поддерева. Условие
+    # «*_path_ids && массив OBJECTID» планировщик для тысяч OBJECTID считает неселективным и
+    # сравнивает массивы в каждой строке таблицы — десятки секунд на дельту двух субъектов
+    def descendants(object_ids, label)
+      objects  = scope_table("pg_temp.gar_#{label}_objects", object_ids)
+      level    = scope_table("pg_temp.gar_level", object_ids)
+      found    = scope_table("pg_temp.gar_level_next")
+      children = hierarchies.map { "SELECT h.object_id FROM #{level} l JOIN #{qualified(Configuration::HIERARCHY_TABLES[_1])} h ON h.parent_obj_id = l.id AND h.is_active" }
+      loop do
+        db_conn.exec("ANALYZE #{level}")
+        added = db_conn.exec("INSERT INTO #{found} SELECT object_id FROM (#{children.join(' UNION ')}) c " \
+                             "WHERE NOT EXISTS (SELECT 1 FROM #{objects} o WHERE o.id = c.object_id)").cmd_tuples
+        break if added.zero?
+
+        db_conn.exec("INSERT INTO #{objects} SELECT id FROM #{found}")
+        db_conn.exec("TRUNCATE #{level}")
+        db_conn.exec("INSERT INTO #{level} SELECT id FROM #{found}")
+        db_conn.exec("TRUNCATE #{found}")
+      end
+      db_conn.exec("ANALYZE #{objects}")
+      objects
+    end
+
+    # Записи таблицы table объектов из временной таблицы objects — во временную таблицу id
+    def rows(table, objects)
+      rows = scope_table("#{objects.delete_suffix('_objects')}_#{table}")
+      db_conn.exec("INSERT INTO #{rows} SELECT t.id FROM #{qualified(table)} t JOIN #{objects} o ON t.object_id = o.id")
+      db_conn.exec("ANALYZE #{rows}")
+      rows
+    end
+
+    # Объекты путей (предки и сами записи) записей таблицы table из временной таблицы rows — в RANKED
+    def add_ancestors(table, rows)
+      ids = hierarchies.map { "SELECT unnest(#{_1}_path_ids) FROM #{qualified(table)} WHERE id IN (SELECT id FROM #{rows})" }
+      db_conn.exec("INSERT INTO #{RANKED} #{ids.join(' UNION ')} ON CONFLICT DO NOTHING")
+    end
+
+    # Число домов по предкам у действующих домов из временной таблицы rows (house_ancestors) — в
+    # HOUSE_COUNTS со знаком sign. До изменения (ids — изменяемые объекты) таблица создаётся, и в
+    # неё записывается прежнее число домов изменяемых объектов: дельта может заменить их записи
+    # новыми, без числа домов
+    def count_houses(rows, sign: -1, ids: nil)
+      if ids
+        db_conn.exec("CREATE TEMP TABLE #{HOUSE_COUNTS} (object_id bigint, base integer, diff integer) ON COMMIT DROP")
+        db_conn.exec_params("INSERT INTO #{HOUSE_COUNTS} SELECT object_id, house_count, 0 FROM #{qualified(:address_objects)} " \
+                            "WHERE object_id = ANY($1::bigint[]) AND is_active AND is_actual", [ids])
+      end
+      db_conn.exec(<<~SQL)
+        INSERT INTO #{HOUSE_COUNTS}
+        SELECT u.object_id, NULL, #{sign} * count(*) FROM #{qualified(:houses)} h CROSS JOIN LATERAL (#{house_ancestors}) u(object_id)
+        WHERE h.is_active AND h.id IN (SELECT id FROM #{rows}) GROUP BY u.object_id
+      SQL
     end
 
     # Временная таблица id до конца транзакции (name — pg_temp.<имя>); values — начальные id
@@ -173,9 +234,6 @@ module Gar
       db_conn.exec_params("INSERT INTO #{name} SELECT unnest($1::bigint[])", [ids_param(values.uniq)])
       name
     end
-
-    # Записи объектов $1 и их потомков (в пути которых они есть)
-    def subtree = ["object_id = ANY($1::bigint[])", *hierarchies.map { "#{_1}_path_ids && $1::bigint[]" }].join(" OR ")
 
     def reset_paths = hierarchies.flat_map { ["full_#{_1}_path = NULL", "full_#{_1}_path_tsv = NULL", "#{_1}_path_ids = NULL"] }.join(", ")
 
@@ -238,41 +296,48 @@ module Gar
     end
 
     # Ранжирование адресных объектов: число действующих домов в поддереве (по обеим
-    # иерархиям, дом считается один раз) и признак административного центра (параметры 22, 23;
-    # не центр — NULL). Пересчитывается при каждом build, переписываются только изменившиеся
-    # строки; затем статистика для планировщика поиска. scope — временная таблица OBJECTID
-    # (rebuild): только эти объекты, по индексам путей и без VACUUM
+    # иерархиям, дом считается один раз) и признак административного центра субъекта
+    # (CAPITAL_PARAM; не центр — NULL). Центр муниципального образования (параметр 23) признака
+    # не даёт: он есть у сотен посёлков и поднимал бы их выше крупных улиц с тем же названием.
+    # Пересчитывается при каждом build, переписываются только изменившиеся строки; затем
+    # статистика для планировщика поиска. scope — временная таблица OBJECTID (rebuild): число
+    # домов меняется на разницу из HOUSE_COUNTS, признак центра — только у объектов scope, без
+    # VACUUM
     def update_ranks(scope: nil)
       logger.info "Ранжирование адресных объектов: число домов и административные центры"
       objects = qualified(:address_objects)
-      db_conn.exec(house_count_sql(objects, scope))
+      db_conn.exec(scope ? house_count_change_sql(objects) : house_count_sql(objects))
       if table_exists?(:addr_obj_params)
         capital = "NULLIF(ao.object_id IN (SELECT object_id FROM #{qualified(:addr_obj_params)} " \
-                  "WHERE type_id IN (22, 23) AND lower(value) NOT IN ('0', 'false')), false)"
+                  "WHERE type_id = #{CAPITAL_PARAM} AND lower(value) NOT IN ('0', 'false')), false)"
         db_conn.exec("UPDATE #{objects} ao SET is_capital = #{capital} WHERE ao.is_capital IS DISTINCT FROM #{capital}" \
                      "#{" AND ao.object_id IN (SELECT id FROM #{scope})" if scope}")
       end
       db_conn.exec("VACUUM (ANALYZE) #{objects}") unless scope
     end
 
-    # Число действующих домов в поддереве каждого адресного объекта (без домов — NULL). Со
-    # scope — только у объектов scope и только по домам их поддеревьев (индексы путей): один
-    # проход по домам затронутых поддеревьев, а не по всей таблице
-    def house_count_sql(objects, scope)
-      if scope
-        within  = hierarchies.map { "h.#{_1}_path_ids && (SELECT array_agg(id) FROM #{scope})" }.join(" OR ")
-        houses  = " AND (#{within}) AND u.object_id IN (SELECT id FROM #{scope})"
-        targets = " AND a.object_id IN (SELECT id FROM #{scope})"
-      end
+    # Число действующих домов в поддереве каждого адресного объекта (без домов — NULL)
+    def house_count_sql(objects)
       <<~SQL
         WITH c AS (
           SELECT u.object_id, count(*)::int AS count
           FROM #{qualified(:houses)} h CROSS JOIN LATERAL (#{house_ancestors}) u(object_id)
-          WHERE h.is_active#{houses} GROUP BY u.object_id
+          WHERE h.is_active GROUP BY u.object_id
         )
         UPDATE #{objects} ao SET house_count = c.count
         FROM #{objects} a LEFT JOIN c ON c.object_id = a.object_id
-        WHERE ao.id = a.id#{targets} AND ao.house_count IS DISTINCT FROM c.count
+        WHERE ao.id = a.id AND ao.house_count IS DISTINCT FROM c.count
+      SQL
+    end
+
+    # Число домов после изменения: прежнее (записанное до него или текущее) плюс разница из
+    # HOUSE_COUNTS; ноль — NULL, как у полного пересчёта
+    def house_count_change_sql(objects)
+      count = "NULLIF(COALESCE(c.base, ao.house_count, 0) + c.diff, 0)"
+      <<~SQL
+        WITH c AS (SELECT object_id, max(base) AS base, sum(diff) AS diff FROM #{HOUSE_COUNTS} GROUP BY object_id)
+        UPDATE #{objects} ao SET house_count = #{count}
+        FROM c WHERE ao.object_id = c.object_id AND ao.house_count IS DISTINCT FROM #{count}
       SQL
     end
 

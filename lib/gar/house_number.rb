@@ -3,17 +3,28 @@
 module Gar
   HouseNumber = Data.define(:number, :building, :structure)
 
-  # Номер дома из ввода: основной номер с литерой или дробью («10», «10а», «10/2») и
-  # необязательные корпус и строение — «10 к2», «10 корп. 2 стр 1», «12а к 2». Слова частей
-  # дома — из групп «корпус» и «строение» встроенных синонимов. number — в том же виде, что
+  # Номер дома из ввода: основной номер с литерой или дробью («10», «10а», «10 лит. А», «10/2»)
+  # и необязательные корпус и строение — «10 к2», «10 корп. 2 стр 1», «12а к 2». Помещение после
+  # номера («10 кв. 5», «12 к. 2 оф. 3») номер заканчивает и отбрасывается. Слова частей дома,
+  # литеры и помещений — из групп встроенных синонимов. number — в том же виде, что
   # houses.house_num_norm: без пробелов, в нижнем регистре, ё → е; латинские буквы, похожие на
   # русские («10a», «10 k2»), заменяются русскими.
   class HouseNumber
+    # Группа встроенных синонимов, в которой есть слово word
+    def self.group(word) = Synonyms.builtin.find { _1.include?(word) } || raise(KeyError, "Нет группы синонимов «#{word}»")
+
     # Части дома — полные имена дополнительных типов ГАР (add_house_types)
     TYPES = { building: "корпус", structure: "строение" }.freeze
-    PARTS = TYPES.transform_values { |word| Synonyms.builtin.find { _1.include?(word) } }.freeze
+    PARTS = TYPES.transform_values { group(_1) }.freeze
     # Дополнительный тип ГАР, номер которого — часть основного номера («18 литера Б» — «18б»)
-    LETTER = "литера"
+    LETTER       = "литера"
+    LETTER_WORDS = group(LETTER).freeze
+    # Тип дома перед номером в строке адреса («д. 10», «влд 5») и помещения после него
+    HOUSE_WORDS   = ["дом", "владение", "домовладение", "здание", "сооружение"].flat_map { group(_1) }.freeze
+    PREMISE_WORDS = ["квартира", "офис", "помещение", "комната"].flat_map { group(_1) }.freeze
+    # Тип дома ГАР «Дом» (полное имя): при одинаковом номере на улице — раньше строения,
+    # сооружения и здания («д. 1» и «стр. 1»)
+    DWELLING = "дом"
     # Латинские буквы, которые набирают вместо похожих русских (в нижнем регистре: «B» → «в»)
     LATIN    = "abcehkmoptxy"
     CYRILLIC = "авсенкмортху"
@@ -62,10 +73,11 @@ module Gar
 
       private
 
-      # Корпус и строение: слово части и номер, каждая часть один раз; лишнее — nil
+      # Корпус и строение: слово части и номер, каждая часть один раз; помещение заканчивает
+      # номер; лишнее — nil
       def parts(tokens)
         parts = {}
-        until tokens.empty?
+        until tokens.empty? || PREMISE_WORDS.include?(tokens.first)
           name  = part(tokens.shift)
           value = tokens.shift
           return unless name && digit?(value) && !parts.key?(name)
@@ -75,11 +87,14 @@ module Gar
         parts
       end
 
-      # Номер и литера за ним («10 а» → «10а»); слово части дома с номером — не литера
+      # Номер и литера за ним («10 а», «10 лит. а» → «10а»); слово части дома с номером — не литера
       def with_letter(value, tokens)
-        letter = tokens.first&.match?(/\A[[:alpha:]]\z/) && !(part(tokens[0]) && digit?(tokens[1]))
+        tokens.shift if LETTER_WORDS.include?(tokens[0]) && letter?(tokens[1])
+        letter = letter?(tokens[0]) && !(part(tokens[0]) && digit?(tokens[1]))
         letter ? value + tokens.shift : value
       end
+
+      def letter?(token) = token&.match?(/\A[[:alpha:]]\z/)
 
       def part(word) = PARTS.find { |_, words| words.include?(word) }&.first
 

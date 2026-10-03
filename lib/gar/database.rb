@@ -29,15 +29,15 @@ module Gar
 
     class << self
       # Новое соединение; закрывает вызывающий. statement_timeout (с) — значение сессии по
-      # умолчанию: передаётся при подключении и переживает RESET ALL
+      # умолчанию: передаётся при подключении и переживает RESET ALL. NOTICE сервера (IF [NOT]
+      # EXISTS в импорте, путях и дельтах) не печатаются: libpq выводит их в stderr процесса
       def create_connection(statement_timeout: nil)
         config = Gar.configuration
         url    = config.database_url
         raise ConfigurationError, "Не задана база ГАР: укажите config.database_url или переменную GAR_DATABASE_URL" if url.to_s.empty?
 
-        options = { connect_timeout: config.connect_timeout, application_name: "gar" }
-        options[:options] = "-c statement_timeout=#{(statement_timeout * 1000).round}" if statement_timeout
-        adopt(PG.connect(url, **options))
+        settings = ["-c client_min_messages=warning", *("-c statement_timeout=#{(statement_timeout * 1000).round}" if statement_timeout)]
+        adopt(PG.connect(url, connect_timeout: config.connect_timeout, application_name: "gar", options: settings.join(" ")))
       end
 
       # Соединение, которое гем не трогает после fork, — в том числе переданное приложением

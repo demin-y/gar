@@ -119,7 +119,7 @@ RSpec.describe "Дельты", :db do
       expect(house_path(4_300_201)).to eq("Кировская обл, Кировский п, Воровского ул, д. 5")
       expect(house_path(4_300_201, :mun)).to eq("Кировская обл, город Киров г.о., Киров г, Воровского ул, д. 5")
       expect(value("SELECT adm_path_ids FROM #{current}.houses WHERE object_id = 4300201")).to eq("{4300001,4300020,4300011,4300201}")
-      expect(house_count(4_300_020)).to eq(village.to_i + 1)
+      expect(house_count(4_300_020)).to eq(village.to_i + 3) # дома 5, 40 и здание 40 переехали вместе с улицей
       expect(house_count(4_300_003)).to eq(city) # по муниципальной иерархии дом остался в городе
     end
 

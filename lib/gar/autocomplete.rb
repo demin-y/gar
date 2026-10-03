@@ -38,13 +38,19 @@ module Gar
 
     private
 
-    # Слова → [текст, HouseNumber или nil]. Число в начале — часть текста («1-я Заречная»)
+    # Слова → [текст, HouseNumber или nil]. Число в начале — часть текста («1-я Заречная»).
+    # Тип дома перед номером («ул. Ленина, д. 10») — не текст: «д» в тексте искалось бы и как
+    # «деревня»
     def split(words)
       (1...words.size).each do |index|
         next unless words[index].match?(/\A\d/)
 
         number = HouseNumber.from_words(words[index..])
-        return [words[...index], number] if number
+        next unless number
+
+        text = words[...index]
+        text.pop while HouseNumber::HOUSE_WORDS.include?(text.last)
+        return [text, number]
       end
       [words, nil]
     end
@@ -69,7 +75,8 @@ module Gar
           WHERE hier.is_active AND hier.parent_obj_id = ANY(#{ids})
             AND starts_with(n.number, #{exact}) #{parts.join(' ')}
           ORDER BY n.number = #{exact} DESC, (h.add_num1 IS NULL AND h.add_num2 IS NULL) DESC,
-                   array_position(#{ids}, hier.parent_obj_id), length(n.number), n.number, h.add_num1, h.add_num2
+                   array_position(#{ids}, hier.parent_obj_id), length(n.number), n.number, h.add_num1, h.add_num2,
+                   lower(ht.name) IS DISTINCT FROM '#{HouseNumber::DWELLING}'
           LIMIT #{sql.bind(limit)}
         SQL
       end

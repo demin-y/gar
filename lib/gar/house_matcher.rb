@@ -11,17 +11,19 @@ module Gar
   # - :fuzzy — с тем же номером ровно один дом, у которого есть всё записанное и что-то сверх
   #   него (в старой записи «12», в ГАР — «12 к. 2»);
   # - :none — иначе, в том числе если таких домов несколько: случайный дом не выбирается.
+  # Из нескольких подходящих с одним номером («д. 1» и «стр. 1») выбирается единственный с
+  # типом «дом»; если и таких несколько — :none.
   # alternatives — другие действующие дома улицы с тем же числом в номере.
   class HouseMatcher
     ALTERNATIVES = 10
 
     # Дом улицы: результат поиска и номер для сравнения (parts — корпус, строение и прочие
-    # дополнительные номера)
+    # дополнительные номера); dwelling — тип дома «дом»
     Candidate =
-      Data.define(:house, :number, :parts) do
+      Data.define(:house, :number, :parts, :dwelling) do
         def self.from_row(row)
           number, parts = HouseNumber.of_house(row["house_num"], [row.values_at("add_name1", "add_num1"), row.values_at("add_name2", "add_num2")])
-          new(house: House.from_row(row), number:, parts:)
+          new(house: House.from_row(row), number:, parts:, dwelling: row["house_type_name"]&.downcase == HouseNumber::DWELLING)
         end
       end
 
@@ -36,11 +38,9 @@ module Gar
       related = candidates(street_guid, wanted, hierarchy)
       same    = related.select { _1.number == wanted.number }
       exact   = same.select { _1.parts == wanted.parts }
-      wider   = same.select { wanted.parts < _1.parts }
-      return result(:exact, related, exact.first) if exact.any?
-      return result(:fuzzy, related, wider.first) if wider.one?
+      return choose(:exact, related, exact) if exact.any?
 
-      result(:none, related)
+      choose(:fuzzy, related, same.select { wanted.parts < _1.parts })
     end
 
     private
@@ -53,14 +53,14 @@ module Gar
 
       number, parts = HouseNumber.comparable(words.join(" "))
       parts = parts.merge({ building:, structure: }.compact.transform_values { HouseNumber.normalize(_1.to_s) })
-      Candidate.new(house: nil, number:, parts: parts.reject { |_, value| value.empty? })
+      Candidate.new(house: nil, number:, parts: parts.reject { |_, value| value.empty? }, dwelling: nil)
     end
 
     # Действующие дома улицы с тем же числом в начале номера («10», «10а», «10/2» для «10»)
     def candidates(street_guid, wanted, hierarchy)
       search.query(Candidate, :match_house, { street_guid: }, hierarchy:) do |sql|
         <<~SQL
-          SELECT #{Search::HOUSE_COLUMNS}, h.add_num1, a1.name AS add_name1, h.add_num2, a2.name AS add_name2
+          SELECT #{Search::HOUSE_COLUMNS}, ht.name AS house_type_name, h.add_num1, a1.name AS add_name1, h.add_num2, a2.name AS add_name2
           FROM #{sql.children(street_guid)}
           JOIN #{search.table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
           #{search.house_type_joins}
@@ -68,6 +68,12 @@ module Gar
           ORDER BY length(h.house_num_norm), h.house_num_norm, h.add_num1 NULLS FIRST, h.add_num2 NULLS FIRST, h.id
         SQL
       end
+    end
+
+    # status с единственным домом из found (из нескольких — единственным с типом «дом»), иначе :none
+    def choose(status, related, found)
+      found = found.select(&:dwelling) unless found.one?
+      found.one? ? result(status, related, found.first) : result(:none, related)
     end
 
     # found — выбранный дом (Candidate) или nil; альтернативы — остальные related
