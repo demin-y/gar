@@ -68,6 +68,8 @@ module Gar
   UpdateResult =
     Data.define(:kind, :from_version, :to_version, :versions, :reason) do
       include Serializable
+
+      def initialize(reason: nil, **) = super
     end
 
   # Применённая дельта из журнала gar_updates схемы (Gar::Delta.history): версия и дата

@@ -203,7 +203,7 @@ module Gar
 
         ids = db_conn.exec(<<~SQL).column_values(0)
           SELECT DISTINCT s.object_id FROM #{staging(table)} s
-          WHERE #{record_conditions(table, meta, archive).then { _1.empty? ? 'true' : _1.join(' AND ') }}
+          WHERE #{keep_condition(table, meta, archive)}
             AND NOT EXISTS (SELECT 1 FROM #{Schema.fetch(objects).qualified_name(schema)} o WHERE o.object_id = s.object_id)
           LIMIT 1000
         SQL

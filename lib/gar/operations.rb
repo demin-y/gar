@@ -63,25 +63,12 @@ module Gar
       with_operation_connection do |conn|
         Database.with_lock(conn, "Обновление ГАР") do
           downloader = Downloader.new
-          current    = Meta.read(conn, configuration.database_schema)
           versions   = downloader.all_versions.sort_by { _1["VersionId"] }
-          latest     = versions.last or raise DownloadError, "API ФНС не вернул ни одной выгрузки"
-          from       = current&.version_id
-          if (reason = full_import_reason(current, versions))
-            logger.info "Полный импорт: #{reason}"
-            # По расписанию загружается и выгрузка той же версии, что текущая: в ней есть то, чего не было в дельтах
-            full_update(conn, downloader.download_full_base(latest, region_codes: configuration.region_codes, on_progress:), on_progress,
-                        reuse_current: !full_import_due?(current))
-            downloader.remove_outdated(latest["VersionId"]) if configuration.cleanup_downloads
-            next UpdateResult.new(kind: :full, from_version: from, to_version: latest["VersionId"], versions: [], reason:)
-          end
+          raise DownloadError, "API ФНС не вернул ни одной выгрузки" if versions.empty?
 
-          chain = versions.select { _1["VersionId"] > from }
-          next UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: [], reason: nil) if chain.empty?
-
-          chain.each { Delta.new(conn).apply(downloader.download_delta(_1, on_progress:), on_progress:) }
-          downloader.remove_outdated(chain.last["VersionId"]) if configuration.cleanup_downloads
-          UpdateResult.new(kind: :delta, from_version: from, to_version: chain.last["VersionId"], versions: chain.map { _1["VersionId"] }, reason: nil)
+          result = update_on(conn, downloader, Meta.read(conn, configuration.database_schema), versions, on_progress)
+          downloader.remove_outdated(result.to_version) if configuration.cleanup_downloads && result.kind != :none
+          result
         end
       end
     end
@@ -127,11 +114,31 @@ module Gar
       Database.with_lock(conn, "Очистка схем") { Schemas.cleanup(conn, configuration.database_schema, keep_backups:) }
     end
 
+    # Обновление текущей схемы current до последней из versions (по возрастанию): полный импорт
+    # или дельты — Gar::UpdateResult
+    def update_on(conn, downloader, current, versions, on_progress)
+      from = current&.version_id
+      if (reason = full_import_reason(current, versions))
+        logger.info "Полный импорт: #{reason}"
+        latest = versions.last
+        full_update(conn, downloader.download_full_base(latest, region_codes: configuration.region_codes, on_progress:), on_progress)
+        return UpdateResult.new(kind: :full, from_version: from, to_version: latest["VersionId"], versions: [], reason:)
+      end
+
+      chain = versions.select { _1["VersionId"] > from }
+      return UpdateResult.new(kind: :none, from_version: from, to_version: from, versions: []) if chain.empty?
+
+      chain.each { Delta.new(conn).apply(downloader.download_delta(_1, on_progress:), on_progress:) }
+      UpdateResult.new(kind: :delta, from_version: from, to_version: chain.last["VersionId"], versions: chain.map { _1["VersionId"] })
+    end
+
     # Почему нужен полный импорт, а не дельты (versions — по возрастанию); nil — текущая схема
-    # обновляется дельтами или уже последней версии
+    # обновляется дельтами или уже последней версии. Причина есть — текущую схему загрузить
+    # заново нельзя: её нет, она загружена иначе, старше последней версии или пора по расписанию
     def full_import_reason(current, versions)
+      settings = Meta.settings(region_codes: configuration.region_codes, tables: configuration.import_tables.map(&:name))
       return "готовой текущей схемы нет" unless current&.ready?
-      return "настройки загрузки в config (субъекты, таблицы…) не совпадают с текущей схемой" unless current.same_import?(current.version_id, **import_settings)
+      return "настройки загрузки в config (субъекты, таблицы…) не совпадают с текущей схемой" unless current.settings == settings
       return "прошлый полный импорт — #{current.imported_at.to_date}, больше full_import_interval дней назад" if full_import_due?(current)
 
       chain_break(current.version_id, versions) unless current.version_id >= versions.last["VersionId"]
@@ -150,16 +157,13 @@ module Gar
     # Прошлый полный импорт старее config.full_import_interval дней
     def full_import_due?(current)
       days = configuration.full_import_interval
-      days && current&.imported_at && current.imported_at < Time.now - (days * 86_400)
+      days && current.imported_at && current.imported_at < Time.now - (days * Downloader::SECONDS_PER_DAY)
     end
 
-    # Субъекты и таблицы, которые загрузит импорт по текущей конфигурации (для Meta#same_import?)
-    def import_settings = { region_codes: configuration.region_codes, tables: configuration.import_tables.map(&:name) }
-
-    # Полный импорт архива zip в новую схему, пути, переключение и очистка схем
-    def full_update(conn, zip, on_progress, reuse_current: true)
-      schema = Importer.new(conn).import_full_base(zip, on_progress:, reuse_current:)
-      return if schema == configuration.database_schema # текущая уже загружена из этой выгрузки
+    # Полный импорт архива zip в новую схему (текущая не переиспользуется: см.
+    # full_import_reason), пути, переключение и очистка схем
+    def full_update(conn, zip, on_progress)
+      schema = Importer.new(conn).import_full_base(zip, on_progress:)
 
       PathBuilder.new(conn, schema:).build(on_progress:)
       switch_on(conn, schema, on_progress)

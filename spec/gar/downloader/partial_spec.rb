@@ -90,23 +90,21 @@ RSpec.describe Gar::Downloader::Partial do
     expect(archive.jobs(tables, region_codes: ["43"])).not_to be_empty
   end
 
-  it "продолжает файл с места обрыва" do
-    data   = Zip::File.open(zip_path) { |zip| zip.find_entry(zip.entries.map(&:name).grep(%r{\A43/AS_HOUSES_\d}).first) }
-    header = File.binread(zip_path, 30, data.local_header_offset).unpack("@26vv").sum + 30
-    serve(zip_path, truncate: data.local_header_offset + header)
+  it "продолжает файл с места обрыва, а не с начала" do
+    houses = Zip::File.open(zip_path) { |zip| zip.find_entry(zip.entries.map(&:name).grep(%r{\A43/AS_HOUSES_\d}).first) }
+    serve(zip_path, truncate: houses.local_header_offset)
 
     path = download(["43"])
 
-    expect(requests.count { _1.start_with?("bytes=#{data.local_header_offset + header}-") }).to eq(1)
+    expect(requests.count { _1.start_with?("bytes=#{houses.local_header_offset}-") }).to eq(1)
     expect(contents(path, ["43"])).to eq(contents(zip_path, ["43"]))
   end
 
   it "после перезапуска докачивает частичный архив, не запрашивая скачанные файлы заново" do
     zip    = Zip::File.open(zip_path) { |file| file.entries.sort_by(&:local_header_offset) }
     houses = zip.find { _1.name.match?(%r{\A43/AS_HOUSES_\d}) }
-    data   = ->(entry) { entry.local_header_offset + 30 + File.binread(zip_path, 4, entry.local_header_offset + 26).unpack("vv").sum }
     serve(zip_path)
-    outage[:from] = data.call(houses)
+    outage[:from] = houses.local_header_offset
 
     expect { download(["43"]) }.to raise_error(Gar::DownloadError, /503/)
     expect(Dir.children(downloads)).to include("gar_xml_v20260116_r43.zip.part", "gar_xml_v20260116_r43.zip.part.json")
@@ -115,8 +113,9 @@ RSpec.describe Gar::Downloader::Partial do
     requests.clear
     path = download(["43"])
 
-    done = zip.select { _1.local_header_offset < houses.local_header_offset && !_1.name.match?(%r{\A(11|50|77|80)/}) }
-    expect(done.map { "bytes=#{data.call(_1)}-" }).to all(satisfy { |range| requests.none? { _1&.start_with?(range) } })
+    # Запросы файлов, скачанных до обрыва: от начала файла до начала следующего
+    done = zip.each_cons(2).select { |entry, _| entry.local_header_offset < houses.local_header_offset && !entry.name.match?(%r{\A(11|50|77|80)/}) }
+    expect(done.map { |entry, after| "bytes=#{entry.local_header_offset}-#{after.local_header_offset - 1}" } & requests).to be_empty
     expect(contents(path, ["43"])).to eq(contents(zip_path, ["43"]))
     expect(Dir.children(downloads)).to eq(["gar_xml_v20260116_r43.zip"])
   end

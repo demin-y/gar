@@ -130,8 +130,11 @@ module Gar
     # Комментарий частичного архива с субъектами region_codes и таблицами субъекта из tables
     # (Schema::Table; справочники корня в нём всегда)
     def self.partial_comment(region_codes, tables)
-      "gar-partial regions=#{region_codes.join(',')} tables=#{tables.select(&:regional).map(&:name).join(',')}"
+      "gar-partial regions=#{region_codes.join(',')} tables=#{regional_names(tables).join(',')}"
     end
+
+    # Имена таблиц субъекта из tables (Schema::Table): частичный архив хранит только их
+    def self.regional_names(tables) = tables.select(&:regional).map(&:name)
 
     def initialize(path)
       raise ImportError, "Архив не найден: #{path}" unless File.file?(path)
@@ -178,17 +181,14 @@ module Gar
 
     # Субъекты и таблицы частичного архива: { regions: ["43", "11"], tables: [:houses, …] };
     # nil — архив полный
-    def partial
-      entries
-      @partial
-    end
+    def partial = toc.last
 
     # Есть ли в архиве субъекты region_codes (пустой список — все) и таблицы tables (Schema::Table)
     def covers?(region_codes, tables)
       return true unless partial
       return false if region_codes.empty?
 
-      (region_codes - partial[:regions]).empty? && (tables.select(&:regional).map(&:name) - partial[:tables]).empty?
+      (region_codes - partial[:regions]).empty? && (self.class.regional_names(tables) - partial[:tables]).empty?
     end
 
     # Поток данных файла (Entry или Job) прямо из zip
@@ -207,23 +207,26 @@ module Gar
 
     def open_entry(entry) = File.open(path, "rb") { |file| yield Stream.new(file, entry) }
 
-    # Оглавление zip читается один раз: имя → Entry; заодно — комментарий частичного архива
-    def entries
-      @entries ||=
-        begin
-          Zip::File.open(path) do |zip|
-            @partial =
-              PARTIAL.match(zip.comment.to_s)&.then do |match|
-                { regions: match[:regions].split(","), tables: match[:tables].split(",").map(&:to_sym) }
-              end
+    # Оглавление: имя → Entry
+    def entries = toc.first
+
+    # Оглавление и состав частичного архива (из комментария zip) — читаются один раз
+    def toc
+      @toc ||=
+        Zip::File.open(path) do |zip|
+          partial =
+            PARTIAL.match(zip.comment.to_s)&.then do |match|
+              { regions: match[:regions].split(","), tables: match[:tables].split(",").map(&:to_sym) }
+            end
+          entries =
             zip.entries.to_h do |entry|
               [entry.name, Entry.new(name: entry.name, size: entry.size, compressed_size: entry.compressed_size, crc: entry.crc,
                                      offset: entry.local_header_offset, compression_method: entry.compression_method)]
             end
-          end
-        rescue Zip::Error => e
-          raise ImportError, "Не удалось прочитать архив #{File.basename(path)}: #{e.message}"
+          [entries, partial]
         end
+    rescue Zip::Error => e
+      raise ImportError, "Не удалось прочитать архив #{File.basename(path)}: #{e.message}"
     end
   end
 end

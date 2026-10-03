@@ -57,7 +57,7 @@ module Gar
       full  = url.to_s.empty? || codes.empty? || Gar.configuration.download_mode == :full
       return download(url, dir, version_id, on_progress) if full || File.exist?(File.join(dir, generate_filename(url, version_id)))
 
-      partial = File.join(dir, generate_filename(url, version_id).sub(/\.zip\z/, "_r#{codes.join('_')}.zip"))
+      partial = File.join(dir, generate_filename(url, version_id, codes))
       if File.exist?(partial) && Archive.new(partial).covers?(codes, tables)
         logger.info "Архив уже скачан: #{partial}"
         return partial
@@ -78,15 +78,12 @@ module Gar
     # каталоги могут совпадать
     def remove_outdated(version_id)
       config = Gar.configuration
-      files  = [[config.delta_dir, true, :<=], [config.full_base_dir, false, :<]].flat_map do |dir, delta, older|
-        Dir.glob(File.join(dir, "*.zip")).select do |path|
-          File.basename(path).include?("delta") == delta && extract_version_from_filename(path)&.public_send(older, version_id)
-        end
-      end.uniq
-      files.each do |path|
-        File.delete(path)
-        logger.info "Удалён архив #{path}"
-      end
+      delta  = ->(file) { File.basename(file[:path]).include?("delta") }
+      deltas = collect_zip_files(config.delta_dir).select { delta.call(_1) && _1[:version] && _1[:version] <= version_id }
+      fulls  = collect_zip_files(config.full_base_dir).select { !delta.call(_1) && _1[:version] && _1[:version] < version_id }
+      files  = (deltas + fulls).uniq
+      perform_deletion(files) if files.any?
+      files.map { _1[:path] }
     end
 
     def cleanup_old_files(directory: nil, keep_days: 30, keep_versions: 5, dry_run: false)
@@ -340,9 +337,10 @@ module Gar
       logger.info("Удалено #{deleted_count} файлов, освобождено #{Utils.format_size(deleted_size)}")
     end
 
-    def generate_filename(url, version_id)
+    # Имя архива: имя файла на сервере, версия и, у частичного, субъекты — gar_xml_v20260116_r11_43.zip
+    def generate_filename(url, version_id, region_codes = [])
       base = URI.parse(url).path.split("/").last.gsub(/[^a-zA-Z0-9._-]/, "_")
-      base.sub(/\.zip$/, "_v#{version_id}.zip")
+      base.sub(/\.zip$/, "_v#{version_id}#{"_r#{region_codes.join('_')}" if region_codes.any?}.zip")
     end
 
     def extract_version_from_filename(filepath) = File.basename(filepath)[/_v(\d+)(?:_r[\d_]+)?\.zip\z/, 1]&.to_i
