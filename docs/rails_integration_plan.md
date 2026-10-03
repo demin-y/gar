@@ -1525,4 +1525,6 @@ lib/gar/railtie.rb, lib/gar/tasks/gar.rake, lib/generators/gar/install/*  Т15
 - `docs/real_data_checklist.md`: выполненное с результатами и оставшееся на данных портала;
   `CLAUDE.md` — инструменты проверки, `gssencmode=disable` на macOS, осторожность с
   файловым сервером ФНС.
-
+- `/code-review medium`: 1 находка, исправлена — `Downloader#cleanup_old_files` считал
+  дублями полный и частичные архивы одной версии и удалял все, кроме самого нового; теперь
+  дубли — только архивы одной версии и одного состава.

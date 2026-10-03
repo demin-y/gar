@@ -196,10 +196,20 @@ RSpec.describe Gar::Downloader do
 
   describe "#cleanup_old_files" do
     let(:temp_dir) { File.join(dir, "cleanup") }
-    let(:keep_days) { 30 }
+
     let(:keep_versions) { 2 }
+    let(:keep_days) { 30 }
 
     before { FileUtils.mkdir_p(temp_dir) }
+
+    it "не считает дублями полный и частичные архивы одной версии" do
+      FileUtils.mkdir_p(temp_dir)
+      names = ["gar_xml_v20261002.zip", "gar_xml_v20261002_r11_43.zip", "gar_xml_v20261002_r77.zip"]
+      names.each_with_index { |name, index| FileUtils.touch(File.join(temp_dir, name), mtime: Time.now - index) }
+
+      expect(downloader.cleanup_old_files(directory: temp_dir, keep_versions: 1)).to eq([])
+      expect(Dir.children(temp_dir)).to match_array(names)
+    end
 
     context "when directory does not exist" do
       it "возвращает пустой массив" do

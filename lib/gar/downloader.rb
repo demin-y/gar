@@ -282,7 +282,9 @@ module Gar
           path:    path,
           mtime:   File.mtime(path),
           size:    File.size(path),
-          version: extract_version_from_filename(path)
+          version: extract_version_from_filename(path),
+          # Состав архива — имя без версии: полный, частичный с субъектами, дельта
+          kind:    File.basename(path).sub(/_v\d+/, "")
         }
       end
     end
@@ -296,8 +298,9 @@ module Gar
         if index >= keep_versions
           files_to_delete.concat(files)
         else
-          sorted_files = files.sort_by { |f| f[:mtime] }.reverse
-          files_to_delete.concat(sorted_files.drop(1))
+          # Из архивов одной версии и одного состава — самый новый; полный и частичные архивы
+          # одной версии (разные субъекты) — не дубли друг друга
+          files.group_by { |f| f[:kind] }.each_value { |same| files_to_delete.concat(same.sort_by { |f| f[:mtime] }.reverse.drop(1)) }
         end
       end
 
