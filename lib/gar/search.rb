@@ -1,269 +1,397 @@
 # frozen_string_literal: true
 
-require "mini_sql"
-require_relative "utils"
-
 module Gar
+  # Поиск по текущей схеме ГАР (config.database_schema). Результаты — AddressObject и House.
+  #
+  # Без явного соединения каждый вызов берёт соединение из пула (Gar.with_connection) только
+  # на время запроса, поэтому один объект Search можно делить между потоками. Недоступная
+  # база или statement_timeout — Gar::UnavailableError. Если загружен ActiveSupport, каждый
+  # вызов публикует событие search.gar (метод, запрос, число результатов).
+  #
+  # Общие параметры методов:
+  # - hierarchy: — :adm (административная) или :mun (муниципальная), по умолчанию
+  #   config.default_hierarchy. Если иерархии нет в схеме (импорт с config.hierarchies без
+  #   неё), поиск по ней бросает ConfigurationError, а не отвечает пустым списком;
+  # - region_codes: — только объекты этих субъектов (%w[43 11]);
+  # - within: — GUID адресного объекта (субъект, район, город): только объекты в его поддереве
+  #   по иерархии запроса, включая его самого.
+  #
+  # Текстовый запрос нормализуется (регистр, ё, точки), каждое слово ищется вместе с
+  # синонимами (Gar::Synonyms): «просп. Октябрьский» находит «Октябрьский пр-кт».
   class Search
-    include Loggable
+    UUID = /\A\h{8}-\h{4}-\h{4}-\h{4}-\h{12}\z/
+    POSTAL_CODE = /\A\d{6}\z/
+    # Порядок адресных объектов при равной текстовой близости: административный центр субъекта
+    # и его улицы (колонка in_capital, Search#object_in_capital), затем объекты с большим числом домов
+    # («Киров» — город раньше деревень «Кировский»), затем регионы, районы, города, населённые
+    # пункты и улицы
+    RANK_ORDER = "in_capital DESC, ao.house_count DESC NULLS LAST, array_position(ARRAY[1, 2, 5, 6, 7, 8], ao.level), ao.name"
+    # Уровни улиц и планировочной структуры: в центре субъекта они поднимаются, как сам центр
+    STREET_LEVELS = [7, 8].freeze
+    ADDRESS_OBJECT_COLUMNS = "ao.id, ao.object_id, ao.object_guid, ao.name, ao.type_name, ao.level, ao.region_code, ao.is_active, " \
+                             "ao.full_adm_path, ao.full_mun_path"
+    HOUSE_COLUMNS          = "h.id, h.object_id, h.object_guid, h.house_num, ht.short_name AS house_type, h.region_code, " \
+                             "h.full_adm_path, h.full_mun_path"
+    # Тип дома ht — не «дом» (строение, сооружение, здание): при одинаковом номере такие ниже
+    NOT_DWELLING           = "lower(ht.name) IS DISTINCT FROM '#{HouseNumber::DWELLING}'".freeze
+    # Естественный порядок номеров домов: 2, 10, 10/2, 10а, 100 — по числу в начале номера; при
+    # одинаковом номере дом раньше строения и сооружения
+    HOUSE_ORDER            = "substring(h.house_num_norm from '^[0-9]+')::numeric NULLS LAST, h.house_num_norm, " \
+                             "h.add_num1 NULLS FIRST, h.add_num2 NULLS FIRST, #{NOT_DWELLING}".freeze
 
-    attr_reader :db_conn, :schema_name, :db
+    attr_reader :db_conn, :schema
 
-    def initialize(db_conn = nil)
-      @db_conn     = db_conn || Gar::Database.connection
-      @schema_name = Gar.configuration.database_schema
-      @db          = MiniSql::Connection.get(@db_conn, auto_encode_arrays: true)
+    # db_conn — своё соединение вместо пула (его закрывает вызывающий)
+    def initialize(db_conn = nil, schema: Gar.configuration.database_schema)
+      @db_conn = db_conn
+      @schema  = schema
     end
 
-    # Полнотекстовый поиск в address_objects (двухфазный: сначала по name, потом по full_path)
-    def search_address_objects(query, path_type: :adm, limit: 20, offset: 0, autocomplete: false)
-      logger.debug "Поиск address_objects: query='#{query}', path_type=#{path_type}, limit=#{limit}"
+    # Полнотекстовый поиск адресных объектов: сначала совпадения по названию (запрос покрыл
+    # название целиком — выше), затем — только по полному пути. autocomplete — последнее слово
+    # ищется как префикс. Шесть цифр — почтовый индекс: объекты с этим индексом и улицы его
+    # домов. Если ничего не нашлось, а в запросе есть типы объектов («р-н», «ул»), запрос
+    # повторяется без них: тип элемента, которого нет в пути, не обнуляет поиск
+    def search_address_objects(query, limit: 20, offset: 0, autocomplete: false, **scope)
+      text = query.to_s.strip
+      return find_by_postal_code(text, limit:, offset:, **scope) if text.match?(POSTAL_CODE)
 
-      return [] if query.to_s.strip.empty?
-
-      table_name   = Utils.full_table_name("address_objects", schema_name:)
-      path_column  = path_type == :adm ? "full_adm_path" : "full_mun_path"
-      tsv_column   = "#{path_column}_tsv"
-      tsquery_func = autocomplete ? "to_tsquery" : "websearch_to_tsquery"
-      search_query = autocomplete ? prepare_autocomplete_query(query) : query
-
-      ctx = { table_name:, path_column:, tsv_column:, tsquery_func:, search_query: }
-
-      # Фаза 1: поиск по name (использует существующий GIN-индекс idx_address_objects_fulltext)
-      name_results = search_address_objects_by_name(ctx, limit:, offset:)
-      return name_results if name_results.size >= limit
-
-      # Фаза 2: дополнить результатами из full_path
-      remaining   = limit - name_results.size
-      path_offset = [offset - count_name_matches(ctx), 0].max
-
-      path_results = search_address_objects_by_path(ctx, exclude_ids: name_results.map(&:id),
-                                                    limit: remaining, offset: path_offset)
-
-      name_results + path_results
+      with_words(text, offset) { |words, synonyms| address_objects(words, synonyms, query, limit:, offset:, autocomplete:, **scope) }
     end
 
-    # Полнотекстовый поиск в houses (stored tsvector)
-    def search_houses(query, path_type: :adm, limit: 20, offset: 0, autocomplete: false)
-      logger.debug "Поиск houses: query='#{query}', path_type=#{path_type}, limit=#{limit}"
-
-      return [] if query.to_s.strip.empty?
-
-      path_column  = path_type == :mun ? "full_mun_path" : "full_adm_path"
-      tsv_column   = "#{path_column}_tsv"
-      table_name   = Utils.full_table_name("houses", schema_name:)
-      tsquery_func = autocomplete ? "to_tsquery" : "websearch_to_tsquery"
-      search_query = autocomplete ? prepare_autocomplete_query(query) : query
-
-      db.query(<<-SQL, search_query:, limit:, offset:)
-        SELECT
-          h.id,
-          h.object_id,
-          h.object_guid,
-          h.house_num,
-          ht.short_name as house_type,
-          h.#{path_column},
-          ts_rank_cd(h.#{tsv_column}, #{tsquery_func}('russian', :search_query)) as rank
-        FROM #{table_name} h
-        LEFT JOIN #{Utils.full_table_name('house_types', schema_name:)} ht ON ht.id = h.house_type
-        WHERE h.is_active = true
-          AND h.#{tsv_column} @@ #{tsquery_func}('russian', :search_query)
-        ORDER BY rank DESC, h.house_num
-        LIMIT :limit OFFSET :offset
-      SQL
+    # Полнотекстовый поиск домов по полному пути; типы объектов — как в search_address_objects
+    def search_houses(query, limit: 20, offset: 0, autocomplete: false, **scope)
+      with_words(query, offset) { |words, synonyms| houses(words, synonyms, query, limit:, offset:, autocomplete:, **scope) }
     end
 
-    # Каскадный поиск address_objects по иерархии (прямые дети)
-    def find_address_objects(parent_guid: nil, path_type: :adm, level: nil, limit: 50, offset: 0)
-      hierarchy_table     = path_type == :adm ? "adm_hierarchy" : "mun_hierarchy"
-      hierarchy_full_name = Utils.full_table_name(hierarchy_table, schema_name:)
-      ao_table_name       = Utils.full_table_name("address_objects", schema_name:)
+    # Каскадный поиск: регионы (без parent_guid) или прямые потомки объекта по иерархии.
+    # level — уровень или список уровней
+    def find_address_objects(parent_guid: nil, level: nil, limit: 50, offset: 0, **scope)
+      return [] if parent_guid && !parent_guid.to_s.match?(UUID)
 
-      if parent_guid.nil?
-        # Поиск регионов (уровень 1)
-        return db.query(<<-SQL, limit:, offset:)
-          SELECT DISTINCT
-            ao.id,
-            ao.object_id,
-            ao.object_guid,
-            ao.name,
-            ao.type_name,
-            ao.level,
-            ao.full_adm_path,
-            ao.full_mun_path
-          FROM #{ao_table_name} ao
-          WHERE ao.is_active = true AND ao.level = 1
-          ORDER BY ao.name
-          LIMIT :limit OFFSET :offset
+      levels = Array(level || (1 unless parent_guid)).map { Integer(_1) }
+      query(AddressObject, :find_address_objects, { parent_guid: }, **scope) do |sql|
+        source = "#{table(:address_objects)} ao"
+        source = "#{sql.children(parent_guid)} JOIN #{source} ON ao.object_id = hier.object_id" if parent_guid
+        <<~SQL
+          SELECT #{ADDRESS_OBJECT_COLUMNS}
+          FROM #{source}
+          WHERE ao.is_active #{"AND ao.level = ANY(#{sql.bind_array(levels, :int)})" if levels.any?} #{sql.bounds('ao')}
+          ORDER BY #{'ao.level, ' if parent_guid}ao.name
+          #{sql.page(limit, offset)}
         SQL
       end
-
-      # Поиск прямых детей по parent_obj_id
-      level_condition = level ? "AND ao.level = :level" : ""
-
-      db.query(<<-SQL, parent_guid:, level:, limit:, offset:)
-        SELECT DISTINCT
-          ao.id,
-          ao.object_id,
-          ao.object_guid,
-          ao.name,
-          ao.type_name,
-          ao.level,
-          ao.full_adm_path,
-          ao.full_mun_path
-        FROM #{hierarchy_full_name} h
-        JOIN #{ao_table_name} ao ON ao.object_id = h.object_id
-        WHERE h.is_active = true
-          AND h.parent_obj_id = (
-            SELECT object_id FROM #{ao_table_name} WHERE object_guid = :parent_guid AND is_active = true LIMIT 1
-          )
-          AND ao.is_active = true
-          #{level_condition}
-        ORDER BY ao.level, ao.name
-        LIMIT :limit OFFSET :offset
-      SQL
     end
 
-    # Поиск домов по parent_guid (прямые дети)
-    def find_houses(parent_guid, path_type: :adm, limit: 100, offset: 0)
-      hierarchy_table     = path_type == :mun ? "mun_hierarchy" : "adm_hierarchy"
-      hierarchy_full_name = Utils.full_table_name(hierarchy_table, schema_name:)
-      houses_table_name   = Utils.full_table_name("houses", schema_name:)
-      ht_table_name       = Utils.full_table_name("house_types", schema_name:)
-      ao_table_name       = Utils.full_table_name("address_objects", schema_name:)
+    # Действующие дома — прямые потомки объекта (улицы) по иерархии
+    def find_houses(parent_guid, limit: 100, offset: 0, **scope)
+      return [] unless parent_guid.to_s.match?(UUID)
 
-      db.query(<<-SQL, parent_guid:, limit:, offset:)
-        SELECT
-          h.id,
-          h.object_id,
-          h.object_guid,
-          h.house_num,
-          ht.short_name as house_type,
-          h.full_adm_path,
-          h.full_mun_path
-        FROM #{hierarchy_full_name} hier
-        JOIN #{houses_table_name} h ON h.object_id = hier.object_id
-        LEFT JOIN #{ht_table_name} ht ON ht.id = h.house_type
-        WHERE hier.parent_obj_id = (
-          SELECT object_id FROM #{ao_table_name}
-          WHERE object_guid = :parent_guid AND is_active = true LIMIT 1
-        )
-          AND hier.is_active = true
-          AND h.is_active = true
-        ORDER BY h.house_num
-        LIMIT :limit OFFSET :offset
-      SQL
+      query(House, :find_houses, { parent_guid: }, **scope) do |sql|
+        <<~SQL
+          SELECT #{HOUSE_COLUMNS}
+          FROM #{sql.children(parent_guid)}
+          JOIN #{table(:houses)} h ON h.object_id = hier.object_id AND h.is_active
+          #{house_type_joins}
+          WHERE true #{sql.bounds('h')}
+          ORDER BY #{HOUSE_ORDER}
+          #{sql.page(limit, offset)}
+        SQL
+      end
     end
 
-    def find_address_object_by_guid(guid, path_type: :adm)
-      full_table_name = Utils.full_table_name("address_objects", schema_name:)
-      path_column = path_type == :adm ? "full_adm_path" : "full_mun_path"
+    def find_address_object_by_guid(guid, **scope)
+      return unless guid.to_s.match?(UUID)
 
-      db.query(<<-SQL, guid:).first
-        SELECT
-          id,
-          object_id,
-          object_guid,
-          name,
-          type_name,
-          level,
-          #{path_column}
-        FROM #{full_table_name}
-        WHERE object_guid = :guid AND is_active = true
-        LIMIT 1
-      SQL
+      query(AddressObject, :find_address_object_by_guid, { guid: }, **scope) do |sql|
+        <<~SQL
+          SELECT #{ADDRESS_OBJECT_COLUMNS} FROM #{table(:address_objects)} ao
+          WHERE ao.object_guid = #{sql.bind(guid)} AND ao.is_active #{sql.bounds('ao')}
+          LIMIT 1
+        SQL
+      end.first
     end
 
-    def find_house_by_guid(guid, path_type: :adm)
-      houses_table = Utils.full_table_name("houses", schema_name:)
-      ht_table     = Utils.full_table_name("house_types", schema_name:)
-      path_column  = path_type == :adm ? "full_adm_path" : "full_mun_path"
+    # Адресные объекты по списку GUID одним запросом (Т10): Hash GUID (как передан) → AddressObject.
+    # Отдаёт и недействующие объекты (active: false): старый GUID мог перестать действовать.
+    # GUID, которых нет в базе или вне границ, в ответе нет; within: находит только действующие
+    def find_address_objects_by_guids(guids, **scope)
+      wanted = Array(guids).map(&:to_s).grep(UUID).uniq
+      return {} if wanted.empty?
 
-      db.query(<<-SQL, guid:).first
-        SELECT
-          h.id,
-          h.object_id,
-          h.object_guid,
-          h.house_num,
-          ht.short_name as house_type,
-          h.#{path_column}
-        FROM #{houses_table} h
-        LEFT JOIN #{ht_table} ht ON ht.id = h.house_type
-        WHERE h.object_guid = :guid AND h.is_active = true
-        LIMIT 1
-      SQL
+      rows =
+        query(AddressObject, :find_address_objects_by_guids, { count: wanted.size }, **scope) do |sql|
+          <<~SQL
+            SELECT DISTINCT ON (ao.object_guid) #{ADDRESS_OBJECT_COLUMNS} FROM #{table(:address_objects)} ao
+            WHERE ao.object_guid = ANY(#{sql.bind_array(wanted, :uuid)}) #{sql.bounds('ao')}
+            ORDER BY ao.object_guid, ao.is_actual DESC, ao.is_active DESC, ao.id DESC
+          SQL
+        end
+      found = rows.to_h { [_1.object_guid, _1] }
+      wanted.to_h { [_1, found[_1.downcase]] }.compact
+    end
+
+    def find_house_by_guid(guid, **scope)
+      return unless guid.to_s.match?(UUID)
+
+      query(House, :find_house_by_guid, { guid: }, **scope) do |sql|
+        <<~SQL
+          SELECT #{HOUSE_COLUMNS} FROM #{table(:houses)} h
+          #{house_type_joins}
+          WHERE h.object_guid = #{sql.bind(guid)} AND h.is_active #{sql.bounds('h')}
+          LIMIT 1
+        SQL
+      end.first
+    end
+
+    # Синонимы схемы (Gar::Synonyms) с текущими настройками
+    def synonyms = Synonyms.for(schema, db_conn)
+
+    def table(name) = Schema.fetch(name).qualified_name(schema)
+
+    # Иерархия запроса: переданная или config.default_hierarchy; неизвестная — ArgumentError
+    def resolve(hierarchy)
+      Configuration.hierarchy(hierarchy || Gar.configuration.default_hierarchy)
+    rescue ConfigurationError => e
+      raise ArgumentError, e.message
+    end
+
+    # Запрос с результатами result_class и событием search.gar (для Autocomplete). Блок
+    # получает Sql с границами (hierarchy:, region_codes:, within:) и соединение, возвращает
+    # SQL. Если запрос обращался к иерархии, пустой ответ проверяется на то, что её не загружали
+    # (а «нет таблицы» — в with_connection)
+    def query(result_class, method, payload, hierarchy: nil, region_codes: nil, within: nil)
+      sql = Sql.new(self, resolve(hierarchy), region_codes, within)
+      Gar.instrument("search.gar", { method:, schema:, **payload }) do |event|
+        with_connection(sql) do |conn|
+          text = yield sql, conn
+          rows = text ? conn.exec_params(text, sql.params).map { result_class.from_row(_1) } : []
+          require_hierarchy(conn, sql.hierarchy) if rows.empty? && sql.hierarchy_used?
+          event[:count] = rows.size
+          rows
+        end
+      end
+    end
+
+    # Соединение db_conn или из пула на время блока (Database.with_connection). «Нет таблицы» —
+    # проверка, что есть сама схема (require_schema), затем — иерархия, если запрос sql к ней
+    # обращался. Удачный запрос лишнего обращения к базе не делает
+    def with_connection(sql = nil)
+      Database.with_connection(db_conn) do |conn|
+        yield conn
+      rescue PG::UndefinedTable
+        require_schema(conn)
+        require_hierarchy(conn, sql.hierarchy) if sql&.hierarchy_used?
+        raise
+      end
+    end
+
+    # ConfigurationError, если иерархии нет в схеме. В прерванной транзакции приложения не
+    # проверяет — остаётся исходная ошибка
+    def require_hierarchy(conn, hierarchy)
+      name = hierarchy_table(hierarchy)
+      return if aborted?(conn) || Database.relation_exists?(conn, name)
+
+      raise ConfigurationError, "Иерархия #{hierarchy} не загружена: в схеме #{schema} нет таблицы #{name}"
+    end
+
+    # UnavailableError, если в схеме нет адресных объектов (Т28): первый выкат до импорта или
+    # прерванное переключение — приложение уходит на ручной ввод, как при недоступной базе.
+    # Зовётся после «нет таблицы»; в прерванной транзакции приложения не проверяет (запрос в ней
+    # невозможен) — остаётся исходная ошибка
+    def require_schema(conn)
+      raise missing_schema unless aborted?(conn) || Database.relation_exists?(conn, table(:address_objects))
+    end
+
+    # Типы дома h (Schema.house_type_joins)
+    def house_type_joins = Schema.house_type_joins(schema, "h")
+
+    def hierarchy_table(hierarchy) = table(Configuration::HIERARCHY_TABLES.fetch(hierarchy))
+
+    # SQL одного запроса: параметры ($n), страница и границы поиска
+    class Sql
+      attr_reader :params
+
+      def initialize(search, hierarchy, region_codes, within)
+        raise ArgumentError, "within: — GUID адресного объекта, получено #{within.inspect}" if within && !within.to_s.match?(UUID)
+
+        @search       = search
+        @hierarchy    = hierarchy
+        @region_codes = region_codes && Configuration.region_codes(region_codes)
+        @within       = within
+        @params       = []
+      end
+
+      # Кладёт значение в параметры и возвращает «$n»
+      def bind(value)
+        @params << value
+        "$#{@params.size}"
+      end
+
+      def bind_array(values, type) = "#{bind(Database.array(values))}::#{type}[]"
+
+      def page(limit, offset) = "LIMIT #{bind(limit)} OFFSET #{bind(offset)}"
+
+      # Иерархия запроса; обращение к ней отмечает, что запрос от неё зависит
+      def hierarchy
+        @hierarchy_used = true
+        @hierarchy
+      end
+
+      def hierarchy_used? = @hierarchy_used || false
+
+      def hierarchy_table = @search.hierarchy_table(hierarchy)
+
+      # Условия границ для алиаса таблицы с region_code и путями
+      def bounds(as)
+        conditions = []
+        conditions << "#{as}.region_code = ANY(#{bind_array(@region_codes, :text)})" if @region_codes&.any?
+        if @within
+          conditions << "#{as}.#{hierarchy}_path_ids @> ARRAY[(SELECT object_id FROM #{@search.table(:address_objects)} " \
+                        "WHERE object_guid = #{bind(@within)} AND is_active LIMIT 1)]"
+        end
+        conditions.map { "AND #{_1}" }.join(" ")
+      end
+
+      # Действующие строки иерархии (алиас hier) — прямые потомки действующего объекта parent_guid
+      def children(parent_guid)
+        "#{hierarchy_table} hier JOIN #{@search.table(:address_objects)} parent ON parent.object_id = hier.parent_obj_id " \
+          "AND parent.object_guid = #{bind(parent_guid)} AND parent.is_active AND hier.is_active"
+      end
     end
 
     private
 
-    # Фаза 1: поиск по name || type_name (использует GIN-индекс idx_address_objects_fulltext)
-    def search_address_objects_by_name(ctx, limit:, offset:)
-      db.query(<<-SQL, search_query: ctx[:search_query], limit:, offset:)
-        SELECT
-          ao.id,
-          ao.object_id,
-          ao.object_guid,
-          ao.name,
-          ao.type_name,
-          ao.level,
-          ao.#{ctx[:path_column]},
-          ts_rank_cd(
-            to_tsvector('russian', ao.name || ' ' || ao.type_name),
-            #{ctx[:tsquery_func]}('russian', :search_query)
-          ) as rank
-        FROM #{ctx[:table_name]} ao
-        WHERE ao.is_active = true
-          AND to_tsvector('russian', ao.name || ' ' || ao.type_name) @@ #{ctx[:tsquery_func]}('russian', :search_query)
-        ORDER BY rank DESC,
-          CASE ao.level WHEN 1 THEN 1 WHEN 2 THEN 2 WHEN 5 THEN 3 WHEN 6 THEN 4 WHEN 8 THEN 5 ELSE 6 END,
-          ao.name
-        LIMIT :limit OFFSET :offset
-      SQL
+    def missing_schema = UnavailableError.new("В базе ГАР нет схемы #{schema} с данными: текущей схемы нет — сначала Gar.update!")
+
+    # Транзакция conn прервана ошибкой: до ROLLBACK запросы в ней невозможны
+    def aborted?(conn) = conn.transaction_status == PG::PQTRANS_INERROR
+
+    # Колонки ранжирования адресного объекта ao: in_capital и house_count (RANK_ORDER)
+    def rank_columns(hierarchy) = "#{object_in_capital(hierarchy)} AS in_capital, ao.house_count"
+
+    # Адресный объект ao в центре субъекта (Т23): сам центр (is_capital) или улица и элемент
+    # планировочной структуры (STREET_LEVELS), у которых центр есть в пути по иерархии запроса
+    def object_in_capital(hierarchy)
+      "(ao.is_capital IS TRUE OR (ao.level IN (#{STREET_LEVELS.join(', ')}) AND #{inside_capital('ao', hierarchy)}))"
     end
 
-    # Фаза 2: поиск по full_path через stored tsvector
-    def search_address_objects_by_path(ctx, exclude_ids:, limit:, offset:)
-      exclude_condition = exclude_ids.empty? ? "" : "AND ao.id NOT IN (#{exclude_ids.join(', ')})"
+    # Дом h в центре субъекта: центр есть в его пути по иерархии запроса
+    def house_in_capital(hierarchy) = inside_capital("h", hierarchy)
 
-      db.query(<<-SQL, search_query: ctx[:search_query], limit:, offset:)
-        SELECT
-          ao.id,
-          ao.object_id,
-          ao.object_guid,
-          ao.name,
-          ao.type_name,
-          ao.level,
-          ao.#{ctx[:path_column]},
-          ts_rank_cd(ao.#{ctx[:tsv_column]}, #{ctx[:tsquery_func]}('russian', :search_query)) as rank
-        FROM #{ctx[:table_name]} ao
-        WHERE ao.is_active = true
-          AND ao.#{ctx[:tsv_column]} @@ #{ctx[:tsquery_func]}('russian', :search_query)
-          #{exclude_condition}
-        ORDER BY rank DESC,
-          CASE ao.level WHEN 1 THEN 1 WHEN 2 THEN 2 WHEN 5 THEN 3 WHEN 6 THEN 4 WHEN 8 THEN 5 ELSE 6 END,
-          ao.name
-        LIMIT :limit OFFSET :offset
-      SQL
+    def inside_capital(as, hierarchy) = "COALESCE(#{as}.#{hierarchy}_path_ids && #{capitals}, false)"
+
+    # OBJECTID центров субъектов: подзапрос без внешних ссылок — один раз на запрос, по
+    # частичному индексу is_capital
+    def capitals = "ARRAY(SELECT object_id FROM #{table(:address_objects)} WHERE is_capital AND is_active)"
+
+    # Слова запроса и синонимы схемы → блок; на первой странице (offset 0) пусто, а без типов
+    # объектов слова другие — блок ещё раз без них. Дальние страницы не повторяются: пустая
+    # страница за концом выдачи не должна подменяться другой выдачей
+    def with_words(query, offset)
+      words = Synonyms.words(query)
+      return [] if words.empty?
+
+      synonyms = self.synonyms
+      found    = yield words, synonyms
+      general  = synonyms.without_types(words)
+      found.empty? && offset.zero? && general.any? && general != words ? yield(general, synonyms) : found
     end
 
-    def count_name_matches(ctx)
-      db.query_single(<<-SQL, search_query: ctx[:search_query]).first || 0
-        SELECT COUNT(*)
-        FROM #{ctx[:table_name]} ao
-        WHERE ao.is_active = true
-          AND to_tsvector('russian', ao.name || ' ' || ao.type_name) @@ #{ctx[:tsquery_func]}('russian', :search_query)
-      SQL
+    # Адресные объекты по словам запроса (search_address_objects)
+    def address_objects(words, synonyms, query, limit:, offset:, autocomplete:, **scope)
+      query(AddressObject, :search_address_objects, { query: }, **scope) do |sql|
+        typed = sql.bind(synonyms.tsquery(words, prefix: autocomplete))
+        exact = sql.bind(synonyms.tsquery(words))
+        last  = sql.bind(synonyms.tsquery(words.last(1), prefix: autocomplete))
+        text  = sql.bind(words.join(" "))
+        bound = sql.bounds("ao")
+        first = sql.bind(limit)
+        skip  = sql.bind(offset)
+        count = "#{first}::int + #{skip}::int"
+        hier  = sql.hierarchy
+        path  = "ao.full_#{hier}_path_tsv"
+        # Запрос покрыл название целиком (последнее слово — как введено, префиксом)
+        covered = " WHERE length(to_tsvector('russian', named.name)) <= q.lexemes"
+        # Точные совпадения выше остальных. По названию точное — запрос покрыл название целиком
+        # (в нём не больше лексем, чем в запросе): «Киров» — город, а не «автомобильная дорога
+        # Киров-Стрижи», и слова в нём — целиком: «Котельнич» — город, а не «Котельничский р-н».
+        # По пути — в названии есть последнее слово запроса («Киров, им. Кирова» — улица Кирова в
+        # Кирове), при автодополнении — как префикс: «Киров Лен» — Ленина наравне с «Ветеран (Лен)».
+        # Совпадения по пути ищутся, только если по названию не набралось limit + offset таких,
+        # что запрос покрыл название целиком, — с префиксом последнего слова, иначе при наборе
+        # «Октябрьский пр» пути сканировались бы на каждое нажатие (у запроса из одного слова —
+        # любых: все объекты с ним в названии уже нашлись). Условие на named — однократный
+        # фильтр, скан путей тогда не выполняется. Объекты без пути по
+        # иерархии запроса (муниципальные образования в административной) не отдаются
+        <<~SQL
+          WITH q AS (SELECT to_tsquery('russian', #{typed}) AS typed, to_tsquery('russian', #{exact}) AS exact,
+                            to_tsquery('russian', #{last}) AS last, length(to_tsvector('russian', #{text})) AS lexemes),
+          named AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{rank_columns(hier)}, 0 AS phase,
+                   ao.name_tsv @@ q.exact AND length(to_tsvector('russian', ao.name)) <= q.lexemes AS exact, 0 AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE ao.is_active AND ao.name_tsv @@ q.typed AND ao.#{hier}_path_ids IS NOT NULL #{bound}
+            ORDER BY exact DESC, #{RANK_ORDER}
+            LIMIT #{count}
+          ),
+          by_path AS (
+            SELECT #{ADDRESS_OBJECT_COLUMNS}, #{rank_columns(hier)}, 1 AS phase,
+                   COALESCE(ao.name_tsv @@ q.last, false) AS exact, ts_rank_cd(#{path}, q.typed) AS rank
+            FROM #{table(:address_objects)} ao, q
+            WHERE (SELECT count(*) FROM named, q#{covered if words.size > 1}) < #{count}
+              AND ao.is_active AND #{path} @@ q.typed AND NOT ao.name_tsv @@ q.typed #{bound}
+            ORDER BY exact DESC, rank DESC, #{RANK_ORDER}
+            LIMIT #{count}
+          )
+          SELECT * FROM (SELECT * FROM named UNION ALL SELECT * FROM by_path) ao
+          ORDER BY exact DESC, phase, rank DESC, #{RANK_ORDER}
+          LIMIT #{first} OFFSET #{skip}
+        SQL
+      end
     end
 
-    # Подготовка запроса для autocomplete: добавляет :* к последнему слову
-    def prepare_autocomplete_query(query)
-      sanitized = query.to_s.strip.gsub(/[!|&:*()\\'"<>]/, " ")
-      words = sanitized.split(/\s+/).reject(&:empty?)
-      return "" if words.empty?
+    # Дома по словам запроса (search_houses)
+    def houses(words, synonyms, query, limit:, offset:, autocomplete:, **scope)
+      query(House, :search_houses, { query: }, **scope) do |sql|
+        path = "h.full_#{sql.hierarchy}_path_tsv"
+        <<~SQL
+          SELECT #{HOUSE_COLUMNS}
+          FROM #{table(:houses)} h
+          CROSS JOIN to_tsquery('russian', #{sql.bind(synonyms.tsquery(words, prefix: autocomplete))}) q
+          #{house_type_joins}
+          WHERE h.is_active AND #{path} @@ q #{sql.bounds('h')}
+          ORDER BY ts_rank_cd(#{path}, q) DESC, #{house_in_capital(sql.hierarchy)} DESC, #{HOUSE_ORDER}
+          #{sql.page(limit, offset)}
+        SQL
+      end
+    end
 
-      # К последнему слову добавляем :* для prefix-поиска
-      words[-1] = "#{words[-1]}:*"
-      words.join(" & ")
+    # Объекты с почтовым индексом (параметр 5) и родители домов с ним — улицы индекса.
+    # Без таблиц параметров — пустой ответ
+    def find_by_postal_code(code, limit:, offset:, **scope)
+      query(AddressObject, :search_address_objects, { query: code }, **scope) do |sql, conn|
+        value   = sql.bind(code)
+        params  = Database.existing_relations(conn, [table(:address_objects), table(:addr_obj_params), table(:house_params)])
+        raise missing_schema unless params.include?(table(:address_objects))
+
+        sources = []
+        if params.include?(table(:addr_obj_params))
+          sources << "SELECT object_id FROM #{table(:addr_obj_params)} WHERE type_id = #{Schema::POSTAL_CODE_PARAM} AND value = #{value}"
+        end
+        if params.include?(table(:house_params))
+          sources << "SELECT hier.parent_obj_id FROM #{table(:house_params)} p JOIN #{sql.hierarchy_table} hier " \
+                     "ON hier.object_id = p.object_id AND hier.is_active WHERE p.type_id = #{Schema::POSTAL_CODE_PARAM} AND p.value = #{value}"
+        end
+        next if sources.empty?
+
+        <<~SQL
+          SELECT #{ADDRESS_OBJECT_COLUMNS}, #{rank_columns(sql.hierarchy)} FROM #{table(:address_objects)} ao
+          WHERE ao.is_active AND ao.object_id IN (#{sources.join(' UNION ')}) #{sql.bounds('ao')}
+          ORDER BY #{RANK_ORDER}
+          #{sql.page(limit, offset)}
+        SQL
+      end
     end
   end
 end

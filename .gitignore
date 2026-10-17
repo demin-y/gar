@@ -1,6 +1,9 @@
 /.bundle/
 /.yardoc
-/.claude
+# Локальные файлы агентов: инструкции и настройки сессий в репозиторий не входят
+/.claude/
+/CLAUDE.md
+/AGENTS.md
 /.ruby-lsp
 /.idea
 /.vscode

@@ -1,10 +1,11 @@
-require:
-   - rubocop-rspec
-   - rubocop-performance
+plugins:
+  - rubocop-rspec
+  - rubocop-performance
 
 AllCops:
-  TargetRubyVersion: 3.1
+  TargetRubyVersion: 3.3
   NewCops: enable
+  SuggestExtensions: false
   Exclude:
     - 'vendor/**/*'
     - 'tmp/**/*'
@@ -24,6 +25,11 @@ Layout/HashAlignment:
 
 Metrics/AbcSize:
   Enabled: false
+
+# Именованные параметры поиска (hierarchy:, region_codes:, within:, limit:, …) — часть
+# публичного API; ограничение — для позиционных
+Metrics/ParameterLists:
+  CountKeywordArgs: false
 
 Metrics/BlockLength:
   Enabled: true
@@ -81,5 +87,6 @@ RSpec/MultipleExpectations:
 RSpec/MultipleMemoizedHelpers:
   Enabled: false
 
-Capybara/RSpec/PredicateMatcher:
-  Enabled: false
+RSpec/DescribeClass:
+  Exclude:
+    - 'spec/integration/**/*'

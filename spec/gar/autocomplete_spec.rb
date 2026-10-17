@@ -1,0 +1,72 @@
+# frozen_string_literal: true
+
+RSpec.describe Gar::Autocomplete, :db do
+  def guid(object_id) = Gar::TestSupport::Sample.guid(object_id)
+  def suggest(query, **) = Gar.autocomplete(query, **)
+
+  it "без номера отдаёт адресные объекты по префиксу" do
+    expect(suggest("Ворово").map { [_1.kind, _1.name, _1.address] })
+      .to eq([[:address_object, "Воровского ул", "Кировская обл, Киров г, Воровского ул"]])
+  end
+
+  it "с номером: сначала точный номер без корпуса, затем номера с префиксом (короткие выше), затем улицы" do
+    found = suggest("Киров, Ленина 10", region_codes: ["43"])
+
+    expect(found.map(&:name)).to eq(["д. 10", "д. 10а", "д. 10/2", "Ленина ул"])
+    expect(found.first).to have_attributes(kind: :house, object_guid: guid(4_300_101), gar_object_id: 4_300_101, level: 10,
+                                           region_code: "43", address: "Кировская обл, Киров г, Ленина ул, д. 10")
+  end
+
+  it "учитывает корпус и строение и границы поиска" do
+    expect(suggest("Ленина 14 корп 1 стр 3").first.gar_object_id).to eq(4_300_106)
+    expect(suggest("Ленина 12 к2").first.gar_object_id).to eq(4_300_104)
+    expect(suggest("Ленина 10a").first.gar_object_id).to eq(4_300_102) # латинская «a»
+    expect(suggest("Ленина 18б").first.gar_object_id).to eq(4_300_108) # «18 литера Б»
+    expect(suggest("Ленина 10", within: guid(1_100_003)).map(&:gar_object_id)).to eq([1_100_101, 1_100_010])
+  end
+
+  {
+    "Киров, ул. Ленина, д. 10"     => 4_300_101, # «д» перед номером — дом, а не «деревня»
+    "г Киров ул Ленина дом 10а"    => 4_300_102,
+    "Ленина 18 лит. Б"             => 4_300_108,
+    "Ленина 10, кв. 5"             => 4_300_101, # помещение отбрасывается
+    "Ленина д. 12 корп. 2 оф. 301" => 4_300_104
+  }.each do |query, object_id|
+    it "понимает строку адреса «#{query}»" do
+      expect(suggest(query, region_codes: ["43"]).first).to have_attributes(kind: :house, gar_object_id: object_id)
+    end
+  end
+
+  it "понимает слитные корпус и строение — «14к1с3», «14 к1 с3» (Т33)" do
+    expect(["Ленина 14к1с3", "Ленина 14 к1 с3", "Ленина 12с1"].map { suggest(_1).first.gar_object_id })
+      .to eq([4_300_106, 4_300_106, 4_300_105])
+  end
+
+  it "отмечает дома с введённым номером целиком — exact (Т32)" do
+    exact = ->(query) { suggest(query, region_codes: ["43"]).map { [_1.name, _1.exact] } }
+
+    expect(exact.call("Ленина 10")).to eq([["д. 10", true], ["д. 10а", false], ["д. 10/2", false], ["Ленина ул", false]])
+    expect(exact.call("Большая Садовая 5").first).to eq(["д. 5 соор. 1", false]) # сооружение сверх номера
+    expect(exact.call("Большая Садовая 88").first).to eq(["соор. 88", true]) # тип дома — не часть номера
+    expect(exact.call("Ленина 12").first(2)).to contain_exactly(["д. 12 к. 2", false], ["д. 12 стр. 1", false])
+    expect(exact.call("Ленина 12 к2").first).to eq(["д. 12 к. 2", true])
+    expect(exact.call("Ленина 14к1с3").first).to eq(["д. 14 к. 1 стр. 3", true])
+    expect(exact.call("Ленина 18Б").first).to eq(["д. 18 литера Б", true])
+    expect(suggest("Ворово").map(&:exact)).to eq([false])
+  end
+
+  it "при одинаковом номере ставит дом раньше здания" do
+    expect(suggest("Воровского 40").first(2).map { [_1.gar_object_id, _1.name] }).to eq([[4_300_204, "д. 40"], [4_300_203, "зд. 40"]])
+  end
+
+  it "ищет по иерархии запроса и отдаёт сериализуемые элементы" do
+    found = suggest("Тихонова 93", hierarchy: :mun).first
+
+    expect(found.address).to eq("Московская обл, Павлово-Посадский г.о., Павловский Посад г, Тихонова ул, д. 93")
+    expect(JSON.parse(found.to_json)).to include("kind" => "house", "object_guid" => guid(44_870_981), "region_code" => "50")
+  end
+
+  it "на пустую строку отвечает пустым списком" do
+    expect(suggest(" , ")).to eq([])
+  end
+end

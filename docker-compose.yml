@@ -15,7 +15,7 @@ services:
       db-test:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db-dev:5432/gar_db_dev
+      - GAR_DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db-dev:5432/gar_db_dev
       - TEST_DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db-test:5432/gar_db_test
       - RUBY_VERSION=3.4.5
       - BUNDLE_GEMFILE=/workspace/Gemfile
@@ -58,11 +58,10 @@ services:
     networks:
       - gar_network
 
-  # Test БД (порт 6433) - PostgreSQL 13
+  # Test БД (порт 6433) - PostgreSQL 17, как dev
+  # Данные спеки загружают сами (Gar::TestSupport.load_fixtures)
   db-test:
-    build:
-      context: .
-      dockerfile: .devcontainer/db-test.Dockerfile
+    image: postgres:17
     container_name: db_test
     environment:
       POSTGRES_DB: gar_db_test

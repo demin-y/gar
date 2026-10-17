@@ -6,18 +6,16 @@
 # CI/CD
 .github
 
-# Development containers (exclude all except entrypoint.sh and db-test.Dockerfile)
+# Development containers (exclude all except entrypoint.sh)
 .devcontainer/*
 !.devcontainer/entrypoint.sh
-!.devcontainer/db-test.Dockerfile
 
 # Documentation
 *.md
 docs/
 
-# Tests (not needed during build, except fixtures for test DB)
+# Tests (not needed during build)
 spec/
-!spec/fixtures/
 test/
 
 # Temporary files

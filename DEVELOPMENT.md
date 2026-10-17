@@ -9,6 +9,7 @@
 - [Docker Compose структура](#docker-compose-структура)
 - [Работа с базами данных](#работа-с-базами-данных)
 - [Тестирование](#тестирование)
+- [Правила проекта](#правила-проекта)
 - [Лучшие практики](#лучшие-практики)
 - [Troubleshooting](#troubleshooting)
 
@@ -73,7 +74,7 @@
 
 | Переменная | Значение | Описание |
 |------------|----------|----------|
-| `DATABASE_URL` | `postgresql://postgres:postgres@db-dev:5432/gar_db_dev` | Dev БД |
+| `GAR_DATABASE_URL` | `postgresql://postgres:postgres@db-dev:5432/gar_db_dev` | Dev БД гема |
 | `RUBY_VERSION` | `3.4.5` | Версия Ruby |
 | `BUNDLE_GEMFILE` | `/workspace/Gemfile` | Путь к Gemfile |
 
@@ -96,16 +97,16 @@
 - Зависит от `db-dev` и `db-test`
 
 #### `db-dev` (dev БД)
-- Postgres 16
+- Postgres 17
 - Порт: `6432:5432`
 - Volume: `postgres_dev_data`
 - Healthcheck: каждые 10 секунд
 
 #### `db-test` (test БД)
-- Postgres 16
+- Postgres 17
 - Порт: `6433:5432`
 - Volume: `postgres_test_data`
-- Auto-init: загружает `spec/fixtures/*.sql`
+- Пустая: данные загружают спеки (`Gar::TestSupport.load_fixtures`)
 - Healthcheck: каждые 5 секунд
 
 ### Volumes
@@ -142,13 +143,12 @@ psql postgresql://postgres:postgres@localhost:6433/gar_db_test
 
 ## Работа с базами данных
 
-### Fixtures (test БД)
+### Тестовые данные (test БД)
 
-Файлы в `spec/fixtures/`:
-- `schema.sql` - DDL (создание таблиц, индексов)
-- `data.sql` - Тестовые данные (INSERT)
-
-Применяются автоматически при создании db-test через `docker-entrypoint-initdb.d`.
+Набор `Gar::TestSupport::Sample` (`lib/gar/test_support/sample.rb`) загружается перед спеками
+через `Gar::TestSupport.load_fixtures` в схему `gar` тем же импортом, что и реальный архив:
+DDL из `Gar::Schema`, затем `PathBuilder`. Ручных `*.sql` нет — новые колонки и таблицы
+попадают в фикстуры сами.
 
 ### Сброс БД
 
@@ -156,7 +156,7 @@ psql postgresql://postgres:postgres@localhost:6433/gar_db_test
 # Dev БД - удаляет volume, пересоздает контейнер
 make dev-db-reset
 
-# Test БД - удаляет volume, пересоздает с fixtures
+# Test БД - удаляет volume, пересоздает пустую
 make test-db-reset
 ```
 
@@ -182,7 +182,7 @@ docker-compose exec -T db-dev psql -U postgres gar_db_dev < backup.sql
 ### Стратегия
 
 - **Unit тесты:** Не требуют БД
-- **Integration тесты:** Используют test БД с fixtures
+- **Тесты с тегом `:db`:** Используют test БД со схемой `gar` из `Gar::TestSupport`
 
 ### spec_helper.rb логика
 
@@ -190,7 +190,7 @@ docker-compose exec -T db-dev psql -U postgres gar_db_dev < backup.sql
 # before(:suite)
 1. Запускает docker-compose up -d db-test
 2. Ждет готовности БД (healthcheck)
-3. Устанавливает DATABASE_URL для Gar
+3. Задаёт config.database_url = TEST_DATABASE_URL
 
 # after(:suite)
 1. Закрывает подключения
@@ -211,6 +211,60 @@ bundle exec rspec spec/gar/importer_spec.rb
 make test-db-psql  # Проверить данные вручную
 ```
 
+## Правила проекта
+
+### Ветки и версии
+
+- `main` — выпущенные версии; работа идёт в своей ветке от `main`, в `main` — через PR с
+  описанием: что сделано, как проверено, что сознательно не сделано.
+- Версии — SemVer: исправление — 2.0.x, новое без ломки API — 2.x.0; публичный API 2.x не
+  ломаем без новой мажорной версии. Каждое заметное изменение — в CHANGELOG, раздел «Не выпущено».
+- Выпуск: `Gar::VERSION`, в CHANGELOG «Не выпущено» → «[x.y.z] — дата», аннотированный тег
+  `vx.y.z` на коммите выпуска в `main`. Гем ставится из GitHub по тегу, на RubyGems не публикуется.
+- Перед PR: `bundle exec rubocop` — без замечаний, `bundle exec rspec` — зелёный.
+
+### Команды
+
+```bash
+bin/setup_test_db                          # тестовый PostgreSQL на :6433 без Docker (идемпотентно)
+bundle exec rspec                          # все тесты; :slow — с GAR_SLOW_TESTS=1
+bundle exec rspec spec/integration         # сквозной конвейер на синтетическом архиве
+bundle exec rubocop
+python3 examples/tools/gar_toc.py <zip|URL> 43 11   # оглавление архива ГАР без распаковки
+ruby examples/tools/check_consistency.rb gar        # реальные данные: инварианты, пересчёт путей и рангов
+ruby examples/tools/compare_schemas.rb gar gar_full # две схемы: цепочка дельт против полной выгрузки
+ruby examples/benchmarks/search_quality.rb          # качество автодополнения (queries_43_11.yml)
+```
+
+- `TEST_DATABASE_URL` по умолчанию `postgresql://postgres:postgres@localhost:6433/gar_db_test`.
+- На macOS в адрес базы — `?gssencmode=disable`: libpq с Kerberos падает после `fork`.
+- К fias-file.nalog.ru — только последовательно и редко: на сотни быстрых запросов сервер
+  включает защиту от ботов (503) примерно на час.
+- Справка: структура реального архива и объёмы — `docs/gar_archive_structure.md`, форматы XML —
+  `docs/xml_schema/*.xsd`, правила адресной строки ФНС — `docs/Правила_формирования_адресной_строки.docx`.
+
+### Тесты
+
+- Без тега — unit-тесты, работают без БД. Тег `:db` — БД подключается лениво, фикстуры
+  (`Gar::TestSupport::Sample`) заливаются автоматически в схему `gar`.
+- Свои схемы в `:db`-примерах — через `isolated_schema` / `register_schema_for_cleanup`
+  (удаляются после примера). Конфигурация гема сбрасывается перед каждым примером.
+- Синтетический архив с реальной структурой — `GarArchiveBuilder`; готовый связный набор
+  (Киров 43, Коми 11, Москва 77, пустой 80) — `GarSampleArchive.build`.
+- Проверяем публичное поведение и результат; моки — только на внешних границах (HTTP, время).
+  Приватные методы через `send` не тестируем.
+- Известная, ещё не исправленная ошибка — пример с `pending "Ошибка N: …"`.
+- Исправление ошибки — по возможности с примером, который без исправления падает.
+
+### Код
+
+- Комментарии, сообщения логов и исключений — на русском.
+- Ruby ≥ 3.3, `# frozen_string_literal: true`, двойные кавычки, rubocop из `.rubocop.yml`.
+- В `lib/` никаких `puts`/`print`/`exit`: логгер `Gar.logger` и исключения гема (`Gar::Error`).
+  Исключение — `lib/gar/tasks.rb` (rake-задачи `gar:*`): итог и прогресс печатаются в `$stdout`,
+  их читает человек или крон в консоли.
+- Имена схем и таблиц в SQL — через `quote_ident`; значения — через параметры.
+
 ## Лучшие практики
 
 ### Разработка
@@ -230,7 +284,7 @@ make test-db-psql  # Проверить данные вручную
 
 1. **Test БД:** Fixtures автоматически загружаются
 2. **Parallel import:** `parallel_import: true` для больших импортов
-3. **Batch size:** Оптимизируйте `batch_size` для COPY операций
+3. **Объём:** импортируйте только нужное — `config.preset` и `region_codes:`
 
 ### Отладка
 
@@ -321,6 +375,12 @@ make dev-db-reset
 make test-db-reset
 ```
 
+### Контейнер БД перезапускается по кругу
+
+В логе `database files are incompatible with server` — том создан прежней версией PostgreSQL
+(например, 13), а образ — 17. Данные test-БД пересоздаются спеками, поэтому том можно удалить:
+`make test-db-reset`; dev-БД — `make dev-db-reset` (её данные пропадут).
+
 ### Fixtures не применяются
 
 ```bash
@@ -333,7 +393,7 @@ make test-db-reset
 
 ## Дополнительные ресурсы
 
-- [PostgreSQL 16 Documentation](https://www.postgresql.org/docs/16/)
+- [PostgreSQL Documentation](https://www.postgresql.org/docs/current/)
 - [RSpec Best Practices](https://rspec.info/)
 - [RuboCop Style Guide](https://rubocop.org/)
 - [Dev Containers Specification](https://containers.dev/)

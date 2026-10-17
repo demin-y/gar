@@ -5,37 +5,85 @@ require "net/http"
 require "uri"
 require "openssl"
 require "fileutils"
+require_relative "downloader/partial"
 
 module Gar
+  # Сведения о выгрузках ГАР (API ФНС) и загрузка архивов.
+  #
+  # Архив качается в <имя>.zip.part и переименовывается только целиком, поэтому импорт
+  # (Importer.find_latest_full_base_zip) никогда не берёт недокачанный файл. Обрыв связи
+  # не теряет скачанное: следующая попытка (или следующий запуск) продолжает .part
+  # запросом Range. Число попыток подряд без прогресса — api_retry_attempts; повторяются и
+  # ответы 5xx и 429 (сервер ФНС отвечает 503 под нагрузкой и на частые запросы). Один архив
+  # качает один процесс (блокировка <архив>.lock), второй получает LockedError.
+  #
+  # С субъектами (region_codes:) полная выгрузка качается частично — только справочники и файлы
+  # нужных таблиц этих субъектов (Downloader::Partial).
   class Downloader
     include Loggable
+    include Partial
+
+    # Ответ 5xx или 429: повторяется, как сетевая ошибка
+    class ServerError < StandardError; end
 
     SECONDS_PER_DAY = 86_400
-    DownloadContext = Struct.new(:http, :uri, :destination_path, :total_size, :show_progress, keyword_init: true)
+    PROGRESS_STEP   = 1 << 20
+    NETWORK_ERRORS  = [Net::OpenTimeout, Net::ReadTimeout, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ETIMEDOUT,
+                       Errno::EHOSTUNREACH, SocketError, EOFError, IOError, OpenSSL::SSL::SSLError, ServerError].freeze
 
     def all_versions
-      api_get(Gar.configuration.api_all_versions_url)
+      get_json(Gar.configuration.api_all_versions_url)
     end
 
     def latest_version
-      api_get(Gar.configuration.api_latest_version_url)
+      get_json(Gar.configuration.api_latest_version_url)
     end
 
     def version_info(version_id)
-      versions = all_versions
-      versions.find { |v| v["VersionId"] == version_id } || raise(Error, "Версия #{version_id} не найдена")
+      all_versions.find { |v| v["VersionId"] == version_id } || raise(DownloadError, "Версия #{version_id} не найдена")
     end
 
-    def download_full_base(version_info, show_progress: false)
-      url        = version_info["GarXMLFullURL"]
-      version_id = version_info["VersionId"]
-      download(url, Gar.configuration.full_base_dir, version_id: version_id, show_progress: show_progress)
+    # Скачивает полную выгрузку в full_base_dir и возвращает путь к zip. region_codes —
+    # только справочники и файлы таблиц tables (Schema::Table, по умолчанию
+    # config.import_tables) этих субъектов: частичный архив <имя>_v<версия>_r43_11.zip. Если
+    # сервер не отдаёт части файла — по config.download_mode: :auto — полный архив с
+    # предупреждением в логе, :partial — DownloadError с причиной. Пустой список, download_mode
+    # :full и уже скачанный полный архив той же версии — полный архив. on_progress —
+    # ->(done, total, stage): байты, stage = :download; total — nil, если сервер не сообщил размер
+    def download_full_base(version_info, region_codes: [], tables: Gar.configuration.import_tables, on_progress: nil)
+      url, version_id = version_info.values_at("GarXMLFullURL", "VersionId")
+      dir   = Gar.configuration.full_base_dir
+      codes = Configuration.region_codes(region_codes).sort # одно имя архива при любом порядке субъектов
+      full  = url.to_s.empty? || codes.empty? || Gar.configuration.download_mode == :full
+      return download(url, dir, version_id, on_progress) if full || File.exist?(File.join(dir, generate_filename(url, version_id)))
+
+      partial = File.join(dir, generate_filename(url, version_id, codes))
+      if File.exist?(partial) && Archive.new(partial).covers?(codes, tables)
+        logger.info "Архив уже скачан: #{partial}"
+        return partial
+      end
+
+      FileUtils.mkdir_p(dir)
+      with_file_lock(partial) { download_partial(url, partial, codes, tables, on_progress) } || without_ranges(url, dir, version_id, on_progress)
     end
 
-    def download_delta(version_info, show_progress: false)
-      url        = version_info["GarXMLDeltaURL"]
-      version_id = version_info["VersionId"]
-      download(url, Gar.configuration.delta_dir, version_id: version_id, show_progress: show_progress)
+    # Скачивает дельту в delta_dir; см. download_full_base
+    def download_delta(version_info, on_progress: nil)
+      download(version_info["GarXMLDeltaURL"], Gar.configuration.delta_dir, version_info["VersionId"], on_progress)
+    end
+
+    # Удаляет скачанное, что уже не нужно базе версии version_id: дельты не новее неё (в
+    # delta_dir) и полные архивы, в том числе частичные, старее неё (в full_base_dir). Возвращает
+    # удалённые пути. Дельта и полный архив различаются по имени (gar_delta_xml…), поэтому
+    # каталоги могут совпадать
+    def remove_outdated(version_id)
+      config = Gar.configuration
+      delta  = ->(file) { File.basename(file[:path]).include?("delta") }
+      deltas = collect_zip_files(config.delta_dir).select { delta.call(_1) && _1[:version] && _1[:version] <= version_id }
+      fulls  = collect_zip_files(config.full_base_dir).select { !delta.call(_1) && _1[:version] && _1[:version] < version_id }
+      files  = (deltas + fulls).uniq
+      perform_deletion(files) if files.any?
+      files.map { _1[:path] }
     end
 
     def cleanup_old_files(directory: nil, keep_days: 30, keep_versions: 5, dry_run: false)
@@ -67,223 +115,159 @@ module Gar
 
     private
 
-    # API методы
+    # Сервер не отдаёт части файла: весь архив (download_mode :auto) или DownloadError (:partial)
+    def without_ranges(url, dir, version_id, on_progress)
+      reason = "сервер #{URI(url).host} не отдаёт части файла (HTTP Range), качать только нужные субъекты нельзя"
+      raise DownloadError, "#{reason}. Весь архив (~50 ГБ) скачается с config.download_mode = :auto или :full" if Gar.configuration.download_mode == :partial
 
-    def api_get(url)
-      options = {}
+      logger.warn "#{reason.capitalize}: скачивается весь архив (~50 ГБ)"
+      download(url, dir, version_id, on_progress)
+    end
 
-      unless Gar.configuration.api_ssl_verify
-        options[:verify] = false
-        logger.warn("SSL верификация отключена для API запросов")
-      end
-
-      response = HTTParty.get(url, options)
-
-      raise DownloadError, "API вернул ошибку: #{response.code} #{response.message}" unless response.success?
+    def get_json(url)
+      uri      = URI(url)
+      response = with_retries(url) { http(uri) { check(_1.request(Net::HTTP::Get.new(uri))) } }
+      raise DownloadError, "API ФНС вернул ошибку: #{response.code} #{response.message}" unless response.is_a?(Net::HTTPSuccess)
 
       JSON.parse(response.body)
     rescue JSON::ParserError => e
-      raise DownloadError, "Ошибка парсинга JSON ответа: #{e.message}"
+      raise DownloadError, "Ошибка разбора JSON ответа API ФНС: #{e.message}"
     end
 
-    # Загрузка файлов
+    def download(url, target_dir, version_id, on_progress)
+      raise DownloadError, "Нет ссылки на архив версии #{version_id}" if url.to_s.empty?
 
-    def download(url, target_dir, version_id: nil, show_progress: false)
+      path = File.join(target_dir, generate_filename(url, version_id))
+      if File.exist?(path)
+        logger.info "Архив уже скачан: #{path}"
+        return path
+      end
+
       FileUtils.mkdir_p(target_dir)
+      with_file_lock(path) do
+        next path if File.exist?(path) # скачал другой процесс, пока ждали
 
-      filename = generate_filename(url, version_id)
-      zip_path = File.join(target_dir, filename)
-
-      logger.info("Скачивание в: #{zip_path}")
-
-      download_file(url, zip_path, show_progress: show_progress)
-
-      logger.info("Файл скачан: #{zip_path} (#{format_bytes(File.size(zip_path))})")
-
-      zip_path
-    end
-
-    # rubocop:disable Metrics/PerceivedComplexity
-    def download_file(url, destination_path, show_progress: false)
-      max_attempts  = Gar.configuration.api_retry_attempts
-      retry_timeout = Gar.configuration.api_retry_timeout
-
-      attempt       = 0
-      last_error    = nil
-      made_progress = false
-
-      while attempt < max_attempts
-        attempt += 1
-
-        begin
-          existing_size = File.exist?(destination_path) ? File.size(destination_path) : 0
-          resume_download = existing_size.positive?
-
-          log_resume_start(existing_size) if resume_download && attempt == 1
-
-          downloaded_size = perform_download(url, destination_path, resume_download, existing_size, show_progress)
-
-          if downloaded_size > existing_size
-            attempt = 0
-            made_progress = true
-          end
-
-          log_resume_complete(downloaded_size, existing_size) if resume_download && existing_size.positive?
-
-          return
-        rescue Net::ReadTimeout, Net::OpenTimeout, Errno::ECONNRESET, Errno::ETIMEDOUT, SocketError => e
-          last_error = e
-
-          if made_progress
-            attempt = 0
-            made_progress = false
-            logger.warn("После успешного прогресса возникла ошибка: #{e.message}. Сбрасываем счетчик и повторяем...")
-          elsif attempt < max_attempts
-            logger.warn("Попытка #{attempt} неудачна: #{e.message}. Повтор через #{retry_timeout} сек...")
-            sleep(retry_timeout)
-          else
-            logger.error("Все #{max_attempts} попыток загрузки неудачны")
-            raise last_error
-          end
-        end
-      end
-
-      raise last_error if last_error
-    end
-    # rubocop:enable Metrics/PerceivedComplexity
-
-    def perform_download(url, destination_path, resume_download, existing_size, show_progress)
-      uri  = URI.parse(url)
-      http = setup_http(uri)
-
-      total_size = fetch_content_length(http, uri)
-      ctx = DownloadContext.new(
-        http: http, uri: uri, destination_path: destination_path,
-        total_size: total_size, show_progress: show_progress
-      )
-
-      if resume_download
-        download_with_resume(ctx, existing_size)
-      else
-        download_from_start(ctx)
+        part = "#{path}.part"
+        logger.info "Скачивание #{url} в #{path}"
+        with_retries(url, progress: -> { file_size(part) }) { fetch(URI(url), part, on_progress) }
+        File.rename(part, path)
+        logger.info "Файл скачан: #{path} (#{Utils.format_size(File.size(path))})"
+        path
       end
     end
 
-    def download_with_resume(ctx, existing_size)
-      request = Net::HTTP::Get.new(ctx.uri.request_uri)
-      request["Range"] = "bytes=#{existing_size}-"
+    # Один процесс на архив: блокировка файла <архив>.lock; занят — LockedError
+    def with_file_lock(path)
+      lock = "#{path}.lock"
+      File.open(lock, File::RDWR | File::CREAT) do |file|
+        raise LockedError, "Архив #{File.basename(path)} уже скачивает другой процесс" unless file.flock(File::LOCK_EX | File::LOCK_NB)
 
-      downloaded_size = existing_size
+        yield.tap { File.delete(lock) }
+      end
+    end
 
-      ctx.http.request(request) do |response|
-        if response.code == "200"
-          logger.info("Сервер не поддерживает возобновление загрузки, начинаем заново...")
-          FileUtils.rm_f(ctx.destination_path)
-          return download_from_start(ctx)
-        end
-
-        validate_partial_response(response)
-
-        File.open(ctx.destination_path, "ab") do |file|
-          response.read_body do |chunk|
-            file.write(chunk)
-            downloaded_size += chunk.bytesize
-            show_download_progress(downloaded_size, ctx.total_size) if ctx.show_progress
-          end
-        end
+    # Дописывает part с текущего размера; сервер без Range отдаёт файл заново (200). Если part
+    # не совпадает с файлом на сервере (416, размеры разные), он удаляется и загрузка идёт с нуля
+    def fetch(uri, part, on_progress)
+      offset  = file_size(part)
+      request = Net::HTTP::Get.new(uri)
+      if offset.positive?
+        request["Range"] = "bytes=#{offset}-"
+        logger.info "Продолжение загрузки с #{Utils.format_size(offset)}"
       end
 
-      finalize_download(ctx, downloaded_size)
-    end
+      restart = false
+      http(uri) do |connection|
+        connection.request(request) do |response|
+          check(response)
+          # 416: part уже содержит весь файл (обрыв пришёлся на самый конец) или чужой
+          next restart = content_range_total(response) != offset if response.is_a?(Net::HTTPRangeNotSatisfiable)
 
-    def download_from_start(ctx)
-      request = Net::HTTP::Get.new(ctx.uri.request_uri)
-      downloaded_size = 0
-
-      ctx.http.request(request) do |response|
-        validate_success_response(response)
-
-        File.open(ctx.destination_path, "wb") do |file|
-          response.read_body do |chunk|
-            file.write(chunk)
-            downloaded_size += chunk.bytesize
-            show_download_progress(downloaded_size, ctx.total_size) if ctx.show_progress
-          end
+          write_body(response, part, offset, on_progress)
         end
       end
+      return unless restart
 
-      finalize_download(ctx, downloaded_size)
+      logger.warn "Недокачанный файл не совпадает с архивом на сервере: загрузка начнётся заново"
+      FileUtils.rm_f(part)
+      fetch(uri, part, on_progress)
     end
 
-    def finalize_download(ctx, downloaded_size)
-      print "\n" if ctx.show_progress
-      validate_download_size(ctx.destination_path, ctx.total_size)
-      downloaded_size
-    end
-
-    def validate_partial_response(response)
-      return if response.code == "206"
-
-      raise DownloadError, "Неожиданный ответ сервера при возобновлении: #{response.code}"
-    end
-
-    def validate_success_response(response)
-      return if response.code == "200"
-
-      raise DownloadError, "Ошибка загрузки: #{response.code} #{response.message}"
-    end
-
-    def validate_download_size(destination_path, expected_size)
-      return unless expected_size
-
-      actual_size = File.size(destination_path)
-      return if actual_size == expected_size
-
-      raise DownloadError,
-            "Размер файла не соответствует ожидаемому: #{format_bytes(actual_size)} вместо #{format_bytes(expected_size)}"
-    end
-
-    # HTTP helpers
-
-    def setup_http(uri)
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl = (uri.scheme == "https")
-      http.read_timeout = Gar.configuration.api_read_timeout
-
-      if http.use_ssl?
-        if Gar.configuration.api_ssl_verify
-          http.verify_mode = OpenSSL::SSL::VERIFY_PEER
-        else
-          http.verify_mode = OpenSSL::SSL::VERIFY_NONE
-          logger.warn("SSL верификация отключена (api_ssl_verify: false)")
-        end
+    # Пишет ответ в part; прогресс — не чаще раза на PROGRESS_STEP байт и в конце
+    def write_body(response, part, offset, on_progress)
+      case response
+      when Net::HTTPPartialContent then total = content_range_total(response)
+      when Net::HTTPOK
+        offset = 0
+        total  = response.content_length
+      else raise DownloadError, "Ошибка загрузки: #{response.code} #{response.message}"
       end
 
-      http
+      reported = offset
+      on_progress&.call(offset, total, :download)
+      File.open(part, offset.zero? ? "wb" : "ab") do |file|
+        response.read_body do |chunk|
+          file.write(chunk)
+          offset += chunk.bytesize
+          next if offset - reported < PROGRESS_STEP
+
+          reported = offset
+          on_progress&.call(offset, total, :download)
+        end
+      end
+      on_progress&.call(offset, total, :download) if reported != offset
+      verify_size(offset, total)
     end
 
-    def fetch_content_length(http, uri)
-      head_request  = Net::HTTP::Head.new(uri.request_uri)
-      head_response = http.request(head_request)
-      head_response["content-length"]&.to_i
+    def content_range_total(response)
+      response["Content-Range"].to_s[%r{/(\d+)\z}, 1]&.to_i
     end
 
-    def log_resume_start(existing_size)
-      logger.info("Найден частично скачанный файл (#{format_bytes(existing_size)}), возобновляем загрузку...")
+    def verify_size(size, total)
+      return if total.nil? || size == total
+
+      raise DownloadError, "Размер файла не совпадает с ожидаемым: #{Utils.format_size(size)} вместо #{Utils.format_size(total)}"
     end
 
-    def log_resume_complete(downloaded_size, existing_size)
-      logger.info("Загрузка возобновлена: +#{format_bytes(downloaded_size - existing_size)}")
+    # Ответ 5xx или 429 — ServerError (повторяется), иначе — сам ответ
+    def check(response)
+      return response unless response.is_a?(Net::HTTPServerError) || response.is_a?(Net::HTTPTooManyRequests)
+
+      raise ServerError, "#{response.code} #{response.message}"
     end
 
-    def show_download_progress(downloaded_size, total_size)
-      return unless total_size&.positive?
+    # Повторяет блок при сетевых ошибках и ответах 5xx: api_retry_attempts попыток подряд без
+    # прогресса (progress — размер скачанного), между ними — пауза api_retry_timeout секунд,
+    # каждый раз вдвое дольше: сервер ФНС отвечает 503 и на частые запросы
+    def with_retries(url, progress: -> { 0 })
+      config   = Gar.configuration
+      failures = 0
+      begin
+        before = progress.call
+        yield
+      rescue *NETWORK_ERRORS => e
+        failures = progress.call > before ? 1 : failures + 1
+        raise DownloadError, "Не удалось скачать #{url} за #{failures} попыток: #{e.class}: #{e.message}" if failures >= config.api_retry_attempts
 
-      progress = (downloaded_size.to_f / total_size * 100).round(1)
-      print "\rПрогресс: #{progress}% (#{format_bytes(downloaded_size)} / #{format_bytes(total_size)})"
+        pause = config.api_retry_timeout * (2**(failures - 1))
+        logger.warn "Сетевая ошибка (#{e.class}: #{e.message}), повтор #{failures} через #{pause} с"
+        sleep(pause)
+        retry
+      end
     end
 
-    # Cleanup helpers
+    def http(uri, &)
+      config  = Gar.configuration
+      options = { use_ssl: uri.scheme == "https", read_timeout: config.api_read_timeout, open_timeout: config.api_read_timeout }
+      options[:ca_file] = config.api_ca_file if config.api_ca_file
+      unless config.api_ssl_verify
+        logger.warn "Проверка SSL-сертификата отключена (api_ssl_verify = false)"
+        options[:verify_mode] = OpenSSL::SSL::VERIFY_NONE
+      end
+      Net::HTTP.start(uri.host, uri.port, **options, &)
+    end
+
+    def file_size(path) = File.exist?(path) ? File.size(path) : 0
 
     def log_cleanup_start(directory, keep_days, keep_versions, dry_run)
       logger.info("Очистка старых файлов в: #{directory}")
@@ -303,25 +287,12 @@ module Gar
       end
     end
 
-    def find_files_to_delete(zip_files, keep_days, keep_versions) # rubocop:disable Metrics/PerceivedComplexity
-      files_to_delete = []
-
-      files_by_version = zip_files.group_by { |f| f[:version] }.sort_by { |version, _| version || 0 }.reverse
-
-      files_by_version.each_with_index do |(_version, files), index|
-        if index >= keep_versions
-          files_to_delete.concat(files)
-        else
-          sorted_files = files.sort_by { |f| f[:mtime] }.reverse
-          files_to_delete.concat(sorted_files.drop(1))
-        end
-      end
-
+    # Архивы версий старше keep_versions последних и файлы старше keep_days дней. Архивы
+    # оставляемых версий хранятся все: полный и частичные (разные субъекты) — не дубли
+    def find_files_to_delete(zip_files, keep_days, keep_versions)
+      by_version  = zip_files.group_by { |f| f[:version] }.sort_by { |version, _| version || 0 }.reverse
       cutoff_time = Time.now - (keep_days * SECONDS_PER_DAY)
-      old_files = zip_files.select { |f| f[:mtime] < cutoff_time }
-      files_to_delete.concat(old_files)
-
-      files_to_delete.uniq
+      (by_version.drop(keep_versions).flat_map(&:last) + zip_files.select { |f| f[:mtime] < cutoff_time }).uniq
     end
 
     def report_files_to_delete(files_to_delete)
@@ -330,9 +301,9 @@ module Gar
       logger.info("Найдено #{files_to_delete.length} файлов для удаления:")
       files_to_delete.each do |file|
         age_days = ((Time.now - file[:mtime]) / SECONDS_PER_DAY).round(1)
-        logger.info("  #{File.basename(file[:path])} (#{format_bytes(file[:size])}, #{age_days} дней)")
+        logger.info("  #{File.basename(file[:path])} (#{Utils.format_size(file[:size])}, #{age_days} дней)")
       end
-      logger.info("Общий размер для освобождения: #{format_bytes(total_size)}")
+      logger.info("Общий размер для освобождения: #{Utils.format_size(total_size)}")
     end
 
     def perform_deletion(files_to_delete)
@@ -350,29 +321,15 @@ module Gar
         logger.error "Ошибка удаления #{File.basename(file[:path])}: #{e.message}"
       end
 
-      logger.info("Удалено #{deleted_count} файлов, освобождено #{format_bytes(deleted_size)}")
+      logger.info("Удалено #{deleted_count} файлов, освобождено #{Utils.format_size(deleted_size)}")
     end
 
-    # Utilities
-
-    def format_bytes(bytes)
-      return "0 B" if bytes.nil? || bytes.zero?
-
-      units = ["B", "KB", "MB", "GB"]
-      exp = (Math.log(bytes) / Math.log(1024)).to_i
-      exp = [exp, units.size - 1].min
-      "#{(bytes / (1024.0**exp)).round(1)} #{units[exp]}"
-    end
-
-    def generate_filename(url, version_id)
+    # Имя архива: имя файла на сервере, версия и, у частичного, субъекты — gar_xml_v20260116_r11_43.zip
+    def generate_filename(url, version_id, region_codes = [])
       base = URI.parse(url).path.split("/").last.gsub(/[^a-zA-Z0-9._-]/, "_")
-      base.sub(/\.zip$/, "_v#{version_id}.zip")
+      base.sub(/\.zip$/, "_v#{version_id}#{"_r#{region_codes.join('_')}" if region_codes.any?}.zip")
     end
 
-    def extract_version_from_filename(filepath)
-      filename = File.basename(filepath)
-      match = filename.match(/_v(\d+)\.zip$/)
-      match ? match[1].to_i : nil
-    end
+    def extract_version_from_filename(filepath) = File.basename(filepath)[/_v(\d+)(?:_r[\d_]+)?\.zip\z/, 1]&.to_i
   end
 end
